@@ -6,6 +6,9 @@ RUN npm ci --omit=dev --no-audit --no-fund
 COPY src/ ./src/
 
 FROM base AS development
+COPY config.example.yml ./config.example.yml
+COPY scripts/ ./scripts/
+COPY tests/ ./tests/
 ENV NODE_ENV=development
 USER node
 CMD ["npm", "run", "dev"]

@@ -12,6 +12,10 @@ services:
     volumes:
       - ./dev-config:/config
       - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./tests:/app/tests:ro
+      - ./docs:/app/docs
+      - ./config.example.yml:/app/config.example.yml:ro
     develop:
       watch:
         - action: rebuild

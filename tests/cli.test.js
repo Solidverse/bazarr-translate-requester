@@ -68,3 +68,12 @@ test('actual CLI exit codes and npm routing', () => {
     assert.ifError(result.error); assert.equal(result.status, expected);
   }
 });
+
+test('inspect routes to the read-only operation with validated multi-instance config', async (t) => {
+  const { path } = await fixture(t); capture(t); let calls = 0;
+  assert.equal(await main(['inspect'], { configPath: path, inspect: async (config) => {
+    calls++; assert.equal(config.bazarr.length, 2); return { failed: false };
+  } }), 0);
+  assert.equal(calls, 1);
+  assert.equal(await main(['inspect'], { configPath: path, inspect: async () => ({ failed: true }) }), 1);
+});

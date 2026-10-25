@@ -12,7 +12,9 @@
     "dev": "node --watch src/index.js",
     "test": "node --test",
     "run:generate": "node src/index.js generate",
-    "run:request": "node src/index.js request"
+    "run:request": "node src/index.js request",
+    "bazarr:inspect": "node src/index.js inspect",
+    "update:bazarr-openapi": "node scripts/update-bazarr-openapi.js"
   },
   "dependencies": {
     "yaml": "^2.9.1"

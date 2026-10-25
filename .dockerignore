@@ -6,3 +6,8 @@
 !src/**
 !docker/
 !docker/*.sh
+!scripts/
+!scripts/**
+!tests/
+!tests/**
+!config.example.yml

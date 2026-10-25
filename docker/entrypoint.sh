@@ -36,6 +36,7 @@ if [ "$#" -ge 3 ] && [ "$1" = npm ] && [ "$2" = run ]; then
   case "$3" in
     run:generate) operation=generate ;;
     run:request) operation=request ;;
+    bazarr:inspect) operation=inspect ;;
     *) operation= ;;
   esac
   if [ -n "$operation" ]; then
