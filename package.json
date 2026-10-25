@@ -2,13 +2,19 @@
   "name": "bazarr-translate-requester",
   "version": "0.1.0",
   "private": true,
-  "description": "Short-lived, cron-driven Bazarr translation requester foundation",
+  "description": "On-demand Bazarr translation request orchestrator foundation",
   "type": "module",
-  "engines": { "node": ">=24 <25" },
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "run:generate": "node src/index.js generate",
+    "run:request": "node src/index.js request"
   },
-  "dependencies": { "yaml": "^2.9.1" }
+  "dependencies": {
+    "yaml": "^2.9.1"
+  }
 }

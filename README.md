@@ -1,113 +1,152 @@
 # Bazarr Translate Requester
 
-Phase 1 foundation for `Solidverse/bazarr-translate-requester`. Each execution reads external YAML, validates it, reports enabled Bazarr instances, and exits. Scaffold mode never contacts Bazarr, even when `dryRun` is false. No translation, database, history, server, or persistent application state is implemented.
+A lightweight, headless translation request orchestrator for **Generate → Review → Request → Cleanup**.
+Bazarr manages subtitles and translation requests; Lingarr performs AI translation.
+The app will coordinate requests only, without a database, translation history, UI,
+custom HTTP server or permanent production process.
 
-Development follows [mdblist-seerr-requester](https://github.com/Solidverse/mdblist-seerr-requester): Compose, source bind mounts, Node watch mode, dependency rebuild rules, and external configuration. Production uses Debian cron to start short-lived Node processes instead of a Node scheduler.
+## Current status
 
-## Development (Docker Compose only)
+Phase 2 provides YAML loading, multi-instance validation, credential-safe structured
+logging and manual CLI routing. **Translation functionality is not implemented yet.**
+Both operation scaffolds validate configuration, identify the requested operation,
+report that it is not implemented and exit successfully. Neither connects to Bazarr
+nor creates or processes a request file. Actual configuration/command errors exit
+nonzero. No translation requests happen automatically, including in development.
 
-Create configuration once, then edit it locally. These commands preserve an existing file:
+## Configuration
+
+Mount an external directory at `/config`. Copy `config.example.yml` to your local
+`config.yml`, populate the API keys and keep `dryRun: true` for initial use.
+The application reads `/config/config.yml` afresh for each operation. API keys are
+never included in normal logs or validation errors; do not commit local config.
+
+```yaml
+translation:
+  sourceLanguage: en
+  targetLanguage: nl
+bazarr:
+  - name: HD
+    enabled: true
+    url: http://bazarr-hd:6767
+    apiKey: YOUR_HD_API_KEY
+  - name: 4K
+    enabled: false
+    url: http://bazarr-4k:6767
+    apiKey: YOUR_4K_API_KEY
+logging:
+  level: info
+dryRun: true
+```
+
+Each Bazarr instance has independent connection settings. Disabled instances are
+not used. Keep distinct names to identify future batch entries. Logging supports
+`debug`, `info`, `warn`, `error` and writes JSON lines to stdout/stderr with API-key
+redaction. Configurable log levels apply to scaffold diagnostics too.
+
+## Commands
 
 ```bash
-mkdir -p dev-config
-test -e dev-config/config.yml || cp config.example.yml dev-config/config.yml
+npm start                 # usage, no configuration required
+node src/index.js help    # usage
+npm run run:generate      # generate scaffold, loads /config/config.yml
+npm run run:request       # request scaffold, loads /config/config.yml
+npm test                  # offline Node.js tests
+```
+
+Node.js 24, ES modules and the existing `yaml` dependency are used. No CLI framework
+or extra services are required. Production commands execute once and terminate.
+
+## Docker development
+
+Put configuration in the ignored `dev-config/config.yml`, then run:
+
+```bash
 docker compose up -d --build
 docker compose logs -f
 ```
 
-`./dev-config:/config` and `./src:/app/src:ro` are bind mounts. `npm run dev` runs `node --watch src/index.js`. After the initial execution finishes, the watcher stays alive and reruns the same entry point on imported JavaScript changes, without restarting the container. There is no development cron daemon or configuration watcher. Configuration edits take effect on the next manual execution or source-triggered execution.
-
-Run manually and run tests inside the development image:
+Compose preserves the `development` Docker target, `npm run dev`,
+`node --watch src/index.js`, source bind mount, external `/config` mount and Compose
+watch rebuild rules. The watcher displays usage at startup and on source reload;
+it does not generate or submit requests. Remaining active in development is
+intentional. To invoke an operation inside the running container:
 
 ```bash
-docker compose exec requester npm start
-docker compose run --rm --no-deps \
-  -v "$PWD/tests:/app/tests:ro" \
-  -v "$PWD/config.example.yml:/app/config.example.yml:ro" \
-  requester npm test
+docker compose exec requester npm run run:generate
+docker compose exec requester npm run run:request
 ```
 
-Enable Compose's dependency/Dockerfile rebuild rules in a separate terminal:
+## On-demand production / Unraid
+
+Image: `ghcr.io/solidverse/bazarr-translate-requester:latest`.
+Mount `/mnt/user/appdata/bazarr-translate-requester` to `/config`.
+No production Compose project or persistent container is required:
 
 ```bash
-docker compose watch
-```
-
-Or use `docker compose up --build --watch` in the foreground. Plain `up -d --build` enables source reload through Node; Compose rebuild rules require an active `watch` session. Development runs as the image's `node` user (1000:1000); ensure the external configuration is readable by that user. `dev-config` is ignored by Git and excluded from image builds. Do not install dependencies or run Node on the host.
-
-## Production (standalone Docker / Unraid)
-
-Create `/mnt/user/appdata/bazarr-translate-requester/config.yml` using `config.example.yml` before starting:
-
-```bash
-docker run -d \
-  --name bazarr-translate-requester \
-  --restart unless-stopped \
-  --stop-timeout 30 \
-  -e TZ=Europe/Amsterdam \
+docker run --rm \
   -v /mnt/user/appdata/bazarr-translate-requester:/config \
-  ghcr.io/solidverse/bazarr-translate-requester:latest
+  ghcr.io/solidverse/bazarr-translate-requester:latest \
+  npm run run:generate
 
-docker logs -f bazarr-translate-requester
+docker run --rm \
+  -v /mnt/user/appdata/bazarr-translate-requester:/config \
+  ghcr.io/solidverse/bazarr-translate-requester:latest \
+  npm run run:request
 ```
 
-No Compose, published ports, source mounts, privileged mode, host networking, or Docker socket are needed. Source and runtime dependencies are baked into the production image. Cron, tzdata, flock (util-linux), gosu, tini, and process utilities are installed in the production stage only. The development watcher is never invoked in production.
+Direct commands such as `node src/index.js generate` also work. The entrypoint
+forwards command arguments; the two supported npm operation aliases are dispatched
+directly to Node so it receives container signals as PID 1. The default command
+prints help and exits. No keep-alive, restart policy or background services are
+needed. Do not use privileged mode, host networking, published ports or Docker
+socket access. No network access is needed for the current scaffolds.
 
-Root initializes cron and changes ownership of `/config` and its single `config.yml` only. Defaults are Unraid's `PUID=99` and `PGID=100`; override both with positive numeric IDs for another host. Node always runs unprivileged, including schedule validation at startup. Do not set `--user`. Existing configuration contents and modes are preserved; missing configuration fails startup and is never created or overwritten. Unrelated files are untouched. Symlinked/hardlinked config files are rejected. Use trusted local appdata storage that allows ownership changes; readonly mounts and filesystems prohibiting chown are unsupported.
+Production defaults to PUID `99`, PGID `100`; override with `-e PUID=1000 -e PGID=1000`
+if necessary. Initialization briefly runs as root, validates positive numeric IDs,
+manages ownership of `/config` and existing `config.yml`/`requests.yml` only, then
+executes the command unprivileged using `gosu`. It preserves contents and file
+modes, does not recurse into unrelated files and rejects linked or special
+application files. Do not use `--user`; restrictive modes, read-only mounts or
+network filesystems that disallow ownership changes may require adjustment.
+Development bypasses this production entrypoint and does not chown WSL bind mounts.
 
-At startup, the entrypoint validates `TZ` against installed timezone data and configures **both `/etc/timezone` and `/etc/localtime`** before starting Debian cron. [Debian cron documents](https://manpages.debian.org/bookworm/cron/cron.8.en.html) that its daemon reads `/etc/timezone`; merely exporting `TZ` is insufficient. UTC is the default. Cron follows Debian's daylight-saving behavior. Application log timestamps use UTC ISO strings.
-
-A short-lived, unprivileged Node initialization validates YAML and writes the schedule through the root shell into `/etc/cron.d/requester`. Cron runs in the foreground under a small shell supervisor and tini. No Node process remains between jobs; the first application execution waits for its scheduled minute. Cron's root launcher opens Docker stdout/stderr, acquires a nonblocking flock, then uses gosu to replace itself with unprivileged Node. The lock remains held until Node exits. Overlaps are skipped with exit code 75. No lock queue or persistent application state is kept; the lock is an ephemeral `/run` file.
-
-Manual execution uses the same lock and identity as cron:
-
-```bash
-docker exec bazarr-translate-requester /usr/local/bin/run-requester
-```
-
-Manual output goes to the invoking terminal. Scheduled stdout/stderr goes directly to `docker logs`. Invalid configuration causes that execution to fail and log a clear error; cron continues to allow later executions after configuration is fixed. YAML syntax diagnostics omit source excerpts. Logs exclude URLs and configuration dumps, and redact API keys even if repeated in an instance name.
-
-SIGTERM/SIGINT stop cron and signal active application processes; the supervisor waits for them, and tini reaps descendants. Docker's stop timeout bounds shutdown. Phase 1 has no work requiring custom Node signal handlers; Node's default termination is appropriate. Increase the timeout when later phases introduce work needing longer cleanup.
-
-## Configuration
-
-The only application configuration path is `/config/config.yml`. Every application execution reads YAML afresh. Restart the container after changing `scheduleCron` or `TZ`; other settings take effect on the next execution. No configuration file watcher runs.
-
-`scheduleCron` accepts five **numeric** fields: minute (0–59), hour (0–23), day (1–31), month (1–12), weekday (0–7, Sunday 0/7). Wildcards, lists, ascending ranges, and positive steps on wildcards/ranges are supported, for example `0 */6 * * *`. Names, seconds, aliases such as `@hourly`, and extensions such as `L`, `W`, and `#` are rejected. This deliberately limited Debian-compatible syntax is validated before cron starts. As with Debian cron, restricted day-of-month and weekday fields match using OR; schedules like February 31 are syntactically valid but may never execute.
-
-Translation language values must be nonempty strings and `minimumAgeHours` must be a nonnegative number; Phase 1 only validates these values. `bazarr` is an array. Each instance requires boolean `enabled`; enabled instances additionally need a nonempty name, API key, and HTTP/HTTPS URL without embedded credentials. Disabled instances may omit those settings. An empty array is allowed. Logging supports `debug`, `info`, `warn`, and `error`; completion messages are at info level. `dryRun` must be boolean. Start with `dryRun: true`.
-
-## Verification
-
-Run the configuration tests using the development command above. They cover valid/missing/invalid YAML, value types, repeated reads, enabled/disabled instances, cron syntax and injection rejection, logging levels, and credential redaction.
-
-Verified on 2026-10-25: all eight unit tests passed; both Docker targets built; source edits reloaded without changing the development container ID; Compose watch rebuilt on a package-file change; manual execution worked in both modes; the production launcher used UID 99; flock rejected overlap with exit 75; Debian cron executed at a specific Amsterdam local minute and delivered logs to Docker; no Node remained afterward; active Node received SIGTERM and container shutdown exited 0. Missing config, invalid cron, invalid timezone and UID 0 all failed startup. Image publication itself requires running the workflow in GitHub and was not performed locally.
-
-Build the standalone production target:
+Build locally:
 
 ```bash
 docker build --target production -t bazarr-translate-requester:local .
+docker build --target development -t bazarr-translate-requester:dev .
 ```
 
-For a runtime smoke test, use a separate temporary config directory, copy the example there, and change **its** schedule to `* * * * *`. Start the local image with that directory mounted at `/config` and `TZ=Europe/Amsterdam`. After a minute, `docker logs` should show one completed scaffold execution. These commands inspect the scheduler and idle processes:
+The existing GitHub Actions workflow remains unchanged: offline tests, production
+build, main publication with `latest`, version tags and commit tags, authenticated
+with `GITHUB_TOKEN`. No release-only publishing requirement is introduced.
 
-```bash
-docker exec bazarr-translate-requester cat /etc/timezone
-docker exec bazarr-translate-requester cat /etc/cron.d/requester
-docker exec bazarr-translate-requester ps -eo pid,ppid,uid,args
-docker exec bazarr-translate-requester /usr/local/bin/run-requester
+## Future temporary batch workflow
+
+The intended user-controlled workflow is:
+
+1. **Generate:** find missing normal Dutch subtitles with suitable embedded English
+   source subtitles across enabled Bazarr instances; create `/config/requests.yml`.
+2. **Review:** manually remove entries you do not want translated.
+3. **Request:** revalidate and submit the remaining entries through Bazarr.
+4. **Cleanup:** remove accepted entries, retain failures for retry, and delete the
+   file once empty. Never overwrite an existing unprocessed batch.
+
+Example of the future batch format:
+
+```yaml
+requests:
+  - instance: HD
+    type: movie
+    title: "Example Movie (2025)"
+    mediaId: 123
+  - instance: HD
+    type: episode
+    title: "Example Series S01E01"
+    mediaId: 456
 ```
 
-Between jobs, the process list should contain cron, tini and the shell supervisor, with no Node process. During execution, Node's UID should match PUID. Confirm reload with `touch src/index.js` and `docker compose logs --since 10s`; the container ID should remain unchanged. Test flock by holding `/run/requester/execution.lock` in one terminal:
-
-```bash
-docker exec bazarr-translate-requester flock /run/requester/execution.lock sleep 90
-```
-
-In another terminal, run the manual command: it must exit 75 immediately without application logs. Scheduled executions during the held lock are skipped too. Test shutdown with `docker stop bazarr-translate-requester`, and inspect the stop message and zero exit status. To test the daemon's actual scheduling timezone, set the smoke config to the next minute's **Amsterdam local hour/minute**, rather than `* * * * *`; a run at that minute verifies the daemon uses the configured zone. Restore the normal schedule and restart afterward.
-
-## Publishing
-
-`.github/workflows/docker-publish.yml` runs Node 24 native tests before publishing the **production** target to `ghcr.io/solidverse/bazarr-translate-requester` for `linux/amd64`. Pull requests run tests only. Main-branch builds publish `latest`; manually created version tags such as `v1.0.0` publish the corresponding `v1.0.0` image tag without replacing `latest`. Builds also receive a full commit SHA tag.
-
-Publishing uses the built-in `GITHUB_TOKEN`; only the publish job has `packages: write`. No personal token, automatic version tags, or releases are used. After the first publish, make the GHCR package public if anonymous pulls are desired. The Docker build context uses an allowlist, excluding local config, tests, Git metadata and environment files. Never put credentials in application source or build arguments.
+This file is temporary, externally mounted and manually editable. It is not a
+permanent database or translation history. **Batch generation, API communication,
+submission and cleanup are future work and are not performed by this phase.**

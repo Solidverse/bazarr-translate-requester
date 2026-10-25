@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
-import { loadConfig, validateCron } from '../src/config.js';
+import { loadConfig } from '../src/config.js';
 import { createLogger } from '../src/logger.js';
 
 const example = await readFile(new URL('../config.example.yml', import.meta.url), 'utf8');
@@ -54,9 +54,7 @@ test('invalid types and values fail with field-specific, secret-free diagnostics
   const base = await loadConfig(path);
   const cases = [
     [null, 'root'],
-    [{ ...base, scheduleCron: '* * * * *\nTOP_SECRET' }, 'scheduleCron'],
     [{ ...base, translation: null }, 'translation'],
-    [{ ...base, translation: { ...base.translation, minimumAgeHours: -1 } }, 'minimumAgeHours'],
     [{ ...base, translation: { ...base.translation, sourceLanguage: '' } }, 'sourceLanguage'],
     [{ ...base, logging: { level: 'TOP_SECRET' } }, 'logging.level'],
     [{ ...base, dryRun: 'true' }, 'dryRun'],
@@ -70,18 +68,6 @@ test('invalid types and values fail with field-specific, secret-free diagnostics
   for (const [config, field] of cases) {
     await writeFile(path, stringify(config));
     await assert.rejects(loadConfig(path), (error) => error.message.includes(field) && !error.message.includes('TOP_SECRET'));
-  }
-});
-
-test('cron accepts numeric five-field Debian syntax', () => {
-  for (const value of ['0 */6 * * *', '* * * * *', '0,30 8-18/2 1,15 1-12 0-7', '59 23 31 12 7', ' 0\t0 * * * ']) {
-    assert.equal(validateCron(value), true, value);
-  }
-});
-
-test('cron rejects invalid ranges, extensions, and injection', () => {
-  for (const value of [null, '', '* * * *', '* * * * * *', '@hourly', '60 * * * *', '0 24 * * *', '0 0 0 * *', '0 0 * 13 *', '0 0 * * 8', '*/0 * * * *', '*/61 * * * *', '9-2 * * * *', '0/2 * * * *', '0 0 * * MON', '0 0 L * *', '0 0 * * 1#2', '* * * * *\nroot evil', '* * * * *%evil', '* * * * *;evil']) {
-    assert.equal(validateCron(value), false, String(value));
   }
 });
 
