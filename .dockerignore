@@ -1,0 +1,10 @@
+# Allow only the files consumed by Dockerfile, keeping external secrets out.
+**
+!package.json
+!package-lock.json
+!src/
+!src/**
+!docker/
+!docker/*.sh
+!scripts/
+!scripts/setup-cron.mjs

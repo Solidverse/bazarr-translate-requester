@@ -1,0 +1,22 @@
+scheduleCron: "0 */6 * * *"
+
+translation:
+  sourceLanguage: en
+  targetLanguage: nl
+  minimumAgeHours: 24
+
+bazarr:
+  - name: HD
+    enabled: true
+    url: http://bazarr-hd:6767
+    apiKey: YOUR_HD_API_KEY
+
+  - name: 4K
+    enabled: true
+    url: http://bazarr-4k:6767
+    apiKey: YOUR_4K_API_KEY
+
+logging:
+  level: info
+
+dryRun: true

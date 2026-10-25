@@ -1,0 +1,22 @@
+services:
+  requester:
+    build:
+      context: .
+      target: development
+    image: bazarr-translate-requester:dev
+    init: true
+    environment:
+      NODE_ENV: development
+      TZ: Europe/Amsterdam
+    command: ["npm", "run", "dev"]
+    volumes:
+      - ./dev-config:/config
+      - ./src:/app/src:ro
+    develop:
+      watch:
+        - action: rebuild
+          path: ./package.json
+        - action: rebuild
+          path: ./package-lock.json
+        - action: rebuild
+          path: ./Dockerfile
