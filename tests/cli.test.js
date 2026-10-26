@@ -20,23 +20,15 @@ function capture(t) {
   return lines;
 }
 for (const operation of ['request']) {
-  test(`${operation} validates config, reports scaffold and makes no network or batch writes`, async (t) => {
-    const { path, directory } = await fixture(t);
-    const lines = capture(t);
-    const network = t.mock.method(globalThis, 'fetch', () => { throw new Error('Network forbidden'); });
-    assert.equal(await main([operation], { configPath: path }), 0);
-    assert.deepEqual(await readdir(directory), ['config.yml']);
-    const batch = join(directory, 'requests.yml');
-    const existing = 'requests:\n  - title: Keep this entry\n';
-    await writeFile(batch, existing);
-    const before = await stat(batch);
-    assert.equal(await main([operation], { configPath: path }), 0);
-    assert.equal(await readFile(batch, 'utf8'), existing);
-    assert.equal((await stat(batch)).mtimeMs, before.mtimeMs);
-    assert.equal(network.mock.callCount(), 0);
-    assert.match(lines.join('\n'), /not implemented yet/);
-    assert.match(lines.join('\n'), new RegExp(`Operation: ${operation}`));
-    assert.doesNotMatch(lines.join('\n'), /YOUR_BAZARR_HD_API_KEY|YOUR_SONARR_HD_API_KEY|YOUR_RADARR_HD_API_KEY|YOUR_BAZARR_4K_API_KEY/);
+  test(`${operation} routes to requester with parsed max and dry-run configuration`, async (t) => {
+    const { path } = await fixture(t); capture(t); let calls = 0;
+    assert.equal(await main([operation, '--max', '1'], { configPath: path, request: async (config, options, dependencies) => {
+      calls++; assert.equal(config.dryRun, true); assert.deepEqual(options, { max: 1 });
+      assert.equal(dependencies.configPath, path); assert.equal(dependencies.signal.aborted, false);
+      return { hasProblems: false };
+    } }), 0);
+    assert.equal(calls, 1);
+    assert.equal(await main([operation], { configPath: path, request: async () => ({ hasProblems: true }) }), 1);
   });
   test(`${operation} exits nonzero for missing or invalid configuration`, async (t) => {
     const { path } = await fixture(t); const lines = capture(t);
@@ -47,12 +39,13 @@ for (const operation of ['request']) {
     assert.match(lines.join('\n'), /Invalid YAML/);
     assert.doesNotMatch(lines.join('\n'), /TOP_SECRET/);
   });
-  test(`${operation} scaffold terminates as a separate process`, async (t) => {
-    const { path } = await fixture(t);
+  test(`${operation} empty dry-run batch terminates as a separate process`, async (t) => {
+    const { path, directory } = await fixture(t);
+    await writeFile(join(directory, 'requests.yml'), 'requests: []\n');
     const source = `import {main} from './src/index.js'; process.exitCode=await main([${JSON.stringify(operation)}],{configPath:process.argv[1]});`;
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', source, path], { cwd: new URL('../', import.meta.url), encoding: 'utf8', timeout: 5000 });
     assert.ifError(result.error); assert.equal(result.status, 0);
-    assert.match(result.stdout, /not implemented yet/);
+    assert.match(result.stdout, /Summary/);
   });
 }
 test('help and npm start usage need no configuration; invalid commands fail safely', async (t) => {
@@ -117,4 +110,13 @@ test('generate validation and runtime errors return nonzero and redact nested cr
   await writeFile(path,await readFile(new URL('../config.example.yml',import.meta.url)));
   assert.equal(await main(['generate','--preview'],{configPath:path,generate:async()=>{throw new Error('YOUR_SONARR_HD_API_KEY generation failed');}}),1);
   assert.match(lines.join(),/generation failed/);assert.doesNotMatch(lines.join(),/YOUR_SONARR_HD_API_KEY/);
+});
+
+test('request interruption returns a signal exit code after allowing current work to finish', async (t) => {
+  const { path } = await fixture(t); capture(t);
+  const before = process.listenerCount('SIGTERM');
+  assert.equal(await main(['request'], { configPath: path, request: async (_config, _options, { signal }) => {
+    process.emit('SIGTERM'); assert.equal(signal.aborted, true); return { hasProblems: false };
+  } }), 143);
+  assert.equal(process.listenerCount('SIGTERM'), before);
 });

@@ -248,3 +248,56 @@ test('language-profile API errors retain operation/status without exposing respo
     && !error.message.includes('SECRET_PROFILE_BODY'));
   assert.equal(calls.length, 1);
 });
+
+for (const mediaType of ['movie', 'episode']) {
+  test(`translation submission uses embedded DB ID and HTTP 204 for ${mediaType}`, async () => {
+    const { client, calls } = setup(() => new Response(null, { status: 204 }));
+    const request = { mediaId: 77, mediaType, targetLanguage: 'nl', track: { id: '123', source: 'embedded', embedded_track_id: 5, hi: true, forced: false } };
+    assert.deepEqual(await client.submitTranslation(request), { accepted: false, dryRun: true }); assert.equal(calls.length, 0);
+    assert.deepEqual(await client.submitTranslation(request, { dryRun: false }), { accepted: true, httpStatus: 204 });
+    const { url, init } = calls[0];
+    assert.equal(init.method, 'PATCH'); assert.equal(init.redirect, 'error'); assert.equal(url.pathname, '/proxy/bazarr/api/subtitles');
+    assert.deepEqual(Object.fromEntries(url.searchParams), { action: 'translate', type: mediaType, id: '77', language: 'nl', forced: 'False', hi: 'True', subtitles_id: '123' });
+    assert.equal(init.headers['X-API-KEY'] === instance.apiKey, true); assert.equal(calls.length, 1);
+  });
+}
+test('external translation preserves exact verified path without confusing database and stream IDs', async () => {
+  const { client, calls } = setup(() => new Response(null, { status: 204 }));
+  const path = '/media/a # b.fr.srt';
+  await client.submitTranslation({ mediaId: 1, mediaType: 'movie', targetLanguage: 'de', track: { id: 44, source: 'external', path, hi: false, forced: false } }, { dryRun: false });
+  assert.equal(calls[0].url.searchParams.get('path'), path); assert.equal(calls[0].url.searchParams.has('subtitles_id'), false);
+  assert.equal(calls[0].url.searchParams.get('hi'), 'False'); assert.equal(calls.length, 1);
+});
+for (const status of [200, 202, 403, 409, 415, 429, 500, 502]) {
+  test(`translation HTTP ${status} is not accepted, is never retried, and exposes no body`, async () => {
+    const { client, calls } = setup(() => new Response('TOP_SECRET sensitive body', { status }));
+    await assert.rejects(client.submitTranslation({ mediaId: 1, mediaType: 'movie', targetLanguage: 'nl', track: { id: 44, source: 'embedded', hi: false, forced: false } }, { dryRun: false }), (error) => {
+      assert.equal(error.httpStatus, status); assert.equal(error.uncertain, status < 400 || status >= 500);
+      assert.equal(error.operation, 'PATCH /api/subtitles'); assert.doesNotMatch(error.message + JSON.stringify(error), /TOP_SECRET|sensitive body/); return true;
+    });
+    assert.equal(calls.length, 1);
+  });
+}
+test('translation connection failure and timeout remain uncertain without automatic resubmission', async () => {
+  for (const timeout of [false, true]) {
+    const { client, calls } = setup((_url, { signal }) => {
+      if (!timeout) throw Object.assign(new TypeError('TOP_SECRET http://private.invalid'), { cause: { code: 'ECONNREFUSED' } });
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    }, { timeoutMs: 10 });
+    await assert.rejects(client.submitTranslation({ mediaId: 1, mediaType: 'episode', targetLanguage: 'nl', track: { id: 44, source: 'embedded', hi: false, forced: false } }, { dryRun: false }), (error) => {
+      assert.equal(error.uncertain, true); assert.equal(error.code, timeout ? 'TIMEOUT' : 'ECONNREFUSED');
+      assert.doesNotMatch(error.message + JSON.stringify(error), /TOP_SECRET|private.invalid/); return true;
+    });
+    assert.equal(calls.length, 1);
+  }
+});
+for (const [method, parameter, idField] of [['getMovie', 'radarrid[]', 'radarrId'], ['getSeriesById', 'seriesid[]', 'sonarrSeriesId']]) {
+  test(`${method} uses a filtered SDK lookup without fetching the entire library`, async () => {
+    const data = [{ [idField]: 7, title: 'Example', profileId: 3 }];
+    const { client, calls } = setup(() => Response.json({ data, total: 1 }));
+    assert.deepEqual(await client[method](7), data[0]); assert.deepEqual(calls[0].url.searchParams.getAll(parameter), ['7']);
+    assert.equal(calls.length, 1);
+    assert.equal(await setup(() => Response.json({ data: [], total: 0 })).client[method](7), null);
+    await assert.rejects(setup(() => Response.json({ data: [{ [idField]: 8, title: 'Wrong' }], total: 1 })).client[method](7), /INVALID_RESPONSE/);
+  });
+}

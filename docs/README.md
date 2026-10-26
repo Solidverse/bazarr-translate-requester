@@ -111,3 +111,30 @@ Manual action is not required when the assigned profile confirms both configured
 languages, even with **Show Only Desired Languages** enabled. An unresolved profile
 may be corrected manually, or the display filter can optionally be disabled. The
 application never changes either, performs a rescan or triggers a provider search.
+
+## Phase 5 submission and cleanup
+
+Installed Tsarr 2.16.3 `applySubtitleMods(options)` forwards `query` to generated
+`patchSubtitles`; JavaScript preserves `subtitles_id`. The client sets zero retries
+and accepts only HTTP 204. Embedded selection uses the database ID; external
+selection uses the exact verified subtitle path. `hi`/`forced` are string booleans
+as parsed by the official route, and the target is resolved to the instance's
+Bazarr code. No unsupported user fields are forwarded.
+
+Fresh read-only revalidation uses SDK `getMovies([id])`, `getSeries([id])`, filtered
+`getEpisodes(undefined, [id])`, settings and language profiles. Existing profile
+visibility, language resolution and eligibility are reused. There are no provider,
+probe, scan, synchronization or job-status calls.
+
+The official [translation implementation](https://github.com/morpheus65535/bazarr/blob/master/bazarr/subtitles/tools/translate/main.py)
+queues translation/extraction work when called without a job ID. The requester waits
+only for the HTTP response, removes the entry after HTTP 204 and never checks later
+job completion. Queued failures after acceptance are therefore outside this app's
+scope. An immediate HTTP 415 remains in YAML; network/timeouts, 5xx and unexpected
+2xx retain entries with an uncertainty warning. Mocked tests prove client behavior,
+not live compatibility with the target installation.
+
+Cleanup uses an exclusive lock and atomic file replacement per accepted entry.
+This is not a transaction with the remote API: a process crash, lost response or
+cleanup failure can require manual verification before retrying. No permanent
+history, retry counters or status fields are added to the batch.

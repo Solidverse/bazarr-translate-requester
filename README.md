@@ -7,11 +7,10 @@ custom HTTP server or permanent production process.
 
 ## Current status
 
-Phase 4B implements language-agnostic request generation and preview, manual YAML
-review, deterministic source selection and optional current-file age filtering.
-`run:request` remains a scaffold; no translations are submitted. Indexed embedded
-tracks can be selected with unknown codecs; see visibility and compatibility notes below.
-The app stays on-demand, database-free and credential-safe.
+Phase 5 adds sequential translation submission and per-acceptance batch cleanup to
+the existing language-agnostic generator. Global `dryRun: true` remains the safe
+default. Accepted means Bazarr returned HTTP 204, not that translation finished.
+There is no translation monitoring, persistent history or background process.
 
 ## Configuration
 
@@ -80,7 +79,8 @@ manual migration before running commands that load it.
 npm start                 # usage, no configuration required
 node src/index.js help    # usage
 npm run run:generate      # generate a review batch from indexed metadata
-npm run run:request       # request scaffold, loads /config/config.yml
+npm run run:request       # validate/submit reviewed batch, respecting global dryRun
+npm run run:request -- --max 1 # at most one submission attempt
 npm run bazarr:inspect   # indexed Bazarr library and wanted metadata
 npm run services:inspect # status/version of all configured services
 npm test                  # offline Node.js tests
@@ -132,7 +132,8 @@ forwards command arguments; supported npm application aliases are dispatched
 directly to Node so it receives container signals as PID 1. The default command
 prints help and exits. No keep-alive, restart policy or background services are
 needed. Do not use privileged mode, host networking, published ports or Docker
-socket access. Generation requires read-only API access; the request scaffold does not.
+socket access. Generation and dry-run requesting use read-only API metadata; live
+requesting additionally calls Bazarr translation PATCH. Every command exits.
 
 Production defaults to PUID `99`, PGID `100`; override with `-e PUID=1000 -e PGID=1000`
 if necessary. Initialization briefly runs as root, validates positive numeric IDs,
@@ -223,7 +224,7 @@ Its implementation documents HTTP 415 for unsupported image-based tracks; failur
 can also occur during the server's queued work. Tsarr's JavaScript serialization
 preserves this parameter, as verified with mocked transport. No particular target
 Bazarr version is assumed and no live translation compatibility is claimed.
-Phase 5 must handle unsupported tracks and server errors safely.
+The requester retains unsupported/failed requests and warns about ambiguous outcomes.
 
 With `onlyEmbedded: false`, existing external `.srt`, `.ass`, `.ssa` and `.vtt`
 tracks with valid database IDs and paths are also eligible. External translation
@@ -260,7 +261,8 @@ assignments/languages manually or optionally disable the display filter; the app
 never modifies Bazarr settings. It rechecks visibility after collection and aborts
 publication if previously established visibility can no longer be confirmed.
 Profiles are a run-local snapshot, not a disk scan or an atomic transaction across
-concurrent profile, setting and library changes; Phase 5 must revalidate fresh data.
+concurrent profile, setting and library changes. The requester revalidates before
+each submission; avoid changing profiles/settings while processing a batch.
 
 The settings GET is an official authenticated read-only endpoint hidden from Swagger;
 Tsarr has no named Bazarr method for it. A narrow adapter uses Tsarr's publicly
@@ -330,10 +332,113 @@ Temporary files are removed afterwards. Filesystems lacking hard-link support fa
 clearly; no unsafe overwrite fallback is used. Required API failures abort publishing;
 normal metadata exclusions are logged and summarized by instance.
 
-The request command is **not implemented**. Phase 5 must validate the selected ID
-against the list and fresh Bazarr metadata, confirm current language settings and
-missing target, submit at most one translation, remove accepted entries, retain
-failures and delete the batch when empty. None of those actions happen now.
+## Request a reviewed batch
+
+`run:request` loads only the entries still in `requests.yml` beside the configuration
+file. It never regenerates or expands the batch. The entire YAML schema and duplicate
+media identities are checked before any API call; unknown/disabled instances and
+per-entry revalidation failures are retained while unrelated entries continue.
+Duplicate identities are scoped by instance, media type and media ID. Numeric-string
+subtitle IDs retain their YAML type; selections are matched to the corresponding
+listed database ID without choosing a different track.
+
+```bash
+# With dryRun: true in your external config.yml: validate only.
+npm run run:request -- --max 1
+
+# After manually changing dryRun to false: one controlled submission attempt.
+npm run run:request -- --max 1
+
+# With dryRun: false: process the complete remaining batch.
+npm run run:request
+```
+
+Inside the development container use `docker compose exec requester` before those
+commands. On production/Unraid the equivalent single-request invocation is:
+
+```bash
+docker run --rm \
+  -v /mnt/user/appdata/bazarr-translate-requester:/config \
+  ghcr.io/solidverse/bazarr-translate-requester:latest \
+  npm run run:request -- --max 1
+```
+
+These commands read your global dry-run setting; there is no implicit live override.
+`--max` is a positive integer limiting PATCH attempts, including failed or uncertain
+attempts. Skipped validation entries do not consume it. Dry-run uses the same budget
+for planned submissions and never calls PATCH or changes batch content/timestamps.
+No `--max` processes the entire batch. Unprocessed entries remain unchanged.
+
+### Revalidation and acceptance
+
+Each entry uses its exact configured instance and current translation languages.
+The requester reuses the language resolver, subtitle eligibility and per-media
+profile visibility rules. It fetches fresh, filtered movie/episode/parent-series
+metadata rather than the entire library per title. Language catalogs are reused
+within a run; filtered profile data is refreshed for each submission. There are no
+Sonarr/Radarr age queries during requesting.
+
+The selected database ID must still belong to that media and remain eligible. Its
+source kind, language, forced/HI flags and path/stream association are checked against
+the reviewed track. A changed/missing selection is retained, **never substituted by
+the automatic default**. Existing target subtitles, including forced/HI, block
+submission. Unknown visibility and mismatched current language settings also retain
+the entry. External sources use the freshly verified exact path; embedded sources
+use database `subtitles_id`, never `embedded_track_id`. HI is preserved, forced
+sources are not submitted, and the target is normalized to Bazarr's language code.
+
+Translations are submitted sequentially through Tsarr `applySubtitleMods`:
+
+1. Read and validate current metadata and selection.
+2. Send one PATCH `/api/subtitles?action=translate`.
+3. Await only that HTTP response, with the existing request timeout and zero retries.
+4. On exactly HTTP **204**, log **Accepted** and atomically remove that entry.
+5. After cleanup finishes, move to the next entry. Delete the batch when empty.
+
+The command never polls jobs, probes media, checks generated files or waits for
+translation completion. Official upstream queues subsequent work; a queued job can
+still fail after HTTP 204. Those failures are intentionally not monitored or restored
+by this application. Actual installed-version compatibility must be tested separately.
+
+HTTP 415 and other confirmed refusals retain the entry for manual selection/correction.
+Timeouts, connection errors, unexpected success statuses and ambiguous server errors
+also retain it, with a possible-duplicate warning. Check Bazarr manually before retrying
+an uncertain entry. No title is automatically resubmitted within the execution.
+
+### Cleanup, locks and interruptions
+
+A temporary exclusive `/config/.requests.lock` prevents concurrent requesters,
+including dry-run executions. The directory therefore needs write access for the
+coordination lock even in dry-run; `requests.yml` itself remains untouched. No other
+history or status files are created. Malformed YAML, duplicate entries and linked
+batch files are rejected without submitting anything.
+
+After each HTTP 204, cleanup preserves remaining order, ID types, manual selections,
+review fields and YAML document nodes/comments. A fully written, synced temporary
+file is atomically renamed over the current batch; an empty batch is unlinked.
+The lock and content/inode checks detect concurrent requester activity or manual
+edits. **Do not edit the batch while the command is running.** Non-cooperating editors
+cannot participate in an atomic transaction with the API; detected edits stop processing
+rather than being overwritten.
+
+If acceptance succeeds but cleanup fails, processing stops immediately, reports the
+accepted media/subtitle identity and sends no further translations. Inspect the batch
+and Bazarr before restarting. Filesystem/API writes cannot form one transaction, so
+a crash or lost response between acceptance and cleanup cannot guarantee exactly-once
+submission without persistent history. No history is introduced here.
+
+SIGINT/SIGTERM stop between entries after allowing the current HTTP response and
+cleanup to finish; they do not cancel a potentially accepted write. Give the current
+HTTP request time to return when stopping a container. A forced kill/crash can leave
+`.requests.lock`; only remove a stale lock manually after verifying no requester is
+still active and checking any uncertain submission. No stale lock is reclaimed
+automatically.
+
+Logs summarize accepted, skipped, failed, uncertain, planned, attempted and remaining
+entries. Accepted is never described as a completed translation. Exit 0 indicates no
+validation/submission problems (a `--max` stop is normal); retained skipped/failed or
+uncertain entries yield exit 1. Invalid YAML, lock errors and cleanup failures also
+exit nonzero. SIGINT/SIGTERM use exit 130/143 respectively.
 
 ## Read-only service inspection
 
@@ -364,6 +469,7 @@ Supported methods in `src/bazarr.js`:
 | `getStatus()` | `/api/system/status` | `data` object |
 | `getLanguages()` | `/api/system/languages` | Bare language-catalog array |
 | `getLanguageProfiles()` | `/api/system/languages/profiles` | Bare profile array; fetched once per filtered instance |
+| `getMovie(id)` / `getSeriesById(id)` | `/api/movies` / `/api/series` | Explicit filtered ID lookup for revalidation |
 | `getMovies()` | `/api/movies` | `data` array and `total`; `start`/`length` |
 | `getSeries()` | `/api/series` | `data` array and `total`; `start`/`length` |
 | `getEpisodes({ seriesIds })` or `({ episodeIds })` | `/api/episodes` | `data` array; required `seriesid[]` or `episodeid[]` |
@@ -415,7 +521,7 @@ Bazarr uses Swagger 2.0; the Seerr reference project uses OpenAPI 3. Tsarr bundl
 generated Bazarr bindings, so there is no application Swagger download command or
 saved specification dependency. See [API notes](docs/README.md) for upstream sources.
 
-A mock-only test verifies this **future** SDK invocation for an embedded track:
+Mock-only tests verify the SDK invocation used by the requester for an embedded track:
 
 ```javascript
 await sdk.applySubtitleMods({ query: {
@@ -428,8 +534,8 @@ The generated `patchSubtitles` passes `query` through, and the serializer keeps
 `subtitles_id` as well as all other supplied parameters. `path` can be omitted in
 JavaScript for embedded translation. The bundled declarations are older: they still
 require `path` and do not declare `subtitles_id`. Mock tests prove serialization,
-not acceptance by any installed Bazarr version or successful translation. There is
-no application translation command yet; the example is not invoked at runtime.
+not acceptance by any installed Bazarr version or successful translation. The
+requester uses this SDK path only with global dry-run explicitly disabled.
 
 ```bash
 docker compose up -d --build
@@ -444,14 +550,17 @@ development documentation. No documentation is downloaded during either command.
 Actual Bazarr connectivity will be tested separately after configuration. Use real
 credentials only in the ignored external config, never in source or committed docs.
 The checked-in config example uses placeholders; leave those unchanged during
-offline development. `request` remains a scaffold; generation uses only the indexed read endpoints described above.
+offline development. Generation uses only indexed read endpoints. Requesting is read-only with dry-run
+and sends only explicitly enabled translation PATCH operations in live mode.
 
 ### No subtitle searches or translation actions
 
 Wanted endpoints only read Bazarr's existing indexed missing-language records.
-They do **not** request a provider search. The application exposes only named
-read methods and never accesses `/api/providers/movies`, `/api/providers/episodes`, scan/refresh,
-download or translation actions. Sonarr/Radarr access is limited to system status
+They do **not** request a provider search. Generation and inspection expose only named read operations. The requester adds
+only the translate PATCH; the application never accesses `/api/providers/movies`, `/api/providers/episodes`, scan/refresh,
+download, synchronization or standalone extraction actions. Sonarr/Radarr access
+is limited to system status
 through `services:inspect`; Bazarr library inspection never initializes those clients.
-`generate` creates a local review batch; `request` remains a scaffold and never
-processes it. Generation and inspection remain short-lived and database-free.
+`generate` creates a local review batch; `request` validates and processes only that
+reviewed batch. Neither triggers subtitle-provider searches or standalone extraction
+operations. All commands remain short-lived and database-free.

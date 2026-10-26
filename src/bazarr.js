@@ -1,5 +1,6 @@
 import { STATUS_CODES } from 'node:http';
 import { BazarrClient } from 'tsarr/bazarr';
+import { validSubtitleId } from './subtitles.js';
 
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const validId = (value) => Number.isSafeInteger(value) && value > 0;
@@ -13,7 +14,7 @@ export function createBazarrClient(instance, { timeoutMs = 30_000 } = {}) {
     if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash
       || typeof instance.apiKey !== 'string' || !instance.apiKey.trim() || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error();
   } catch { throw new Error('Invalid Bazarr client connection settings.'); }
-  const sdk = new BazarrClient({ baseUrl: base.href.replace(/\/+$/, ''), apiKey: instance.apiKey, timeout: timeoutMs });
+  const sdk = new BazarrClient({ baseUrl: base.href.replace(/\/+$/, ''), apiKey: instance.apiKey, timeout: timeoutMs, retry: { maxRetries: 0 } });
   const key = instance.apiKey;
   const name = typeof instance.name === 'string' ? instance.name.replaceAll(key, '[REDACTED]') : 'Bazarr';
   function fail(operation, code, httpStatus) {
@@ -22,7 +23,7 @@ export function createBazarrClient(instance, { timeoutMs = 30_000 } = {}) {
       instance: name, operation: `GET /api/${operation}`, code, ...(httpStatus ? { httpStatus } : {}),
     });
   }
-  // Only named read operations are exposed. Tsarr owns transport, auth and timeout.
+  // Named operations only. Tsarr owns transport, authentication and timeout.
   async function read(operation, execute) {
     let result;
     try { result = await execute(); } catch (error) { transportFailure(operation, error); }
@@ -61,7 +62,50 @@ export function createBazarrClient(instance, { timeoutMs = 30_000 } = {}) {
       if (items.length === total) return items;
     }
   }
+  async function one(operation, id, execute, idField) {
+    if (!validId(id)) fail(operation, 'INVALID_IDS');
+    const result = await read(operation, execute);
+    const items = validateItems(result?.data, operation, idField);
+    if (items.length > 1 || !Number.isSafeInteger(result.total) || result.total !== items.length
+      || items.some((item) => item[idField] !== id)) fail(operation, 'INVALID_RESPONSE');
+    return items[0] ?? null;
+  }
   return {
+    getMovie: (id) => one('movies', id, () => sdk.getMovies([id]), 'radarrId'),
+    getSeriesById: (id) => one('series', id, () => sdk.getSeries([id]), 'sonarrSeriesId'),
+    async submitTranslation({ mediaId, mediaType, targetLanguage, track }, { dryRun = true } = {}) {
+      if (dryRun !== false) return { accepted: false, dryRun: true };
+      if (!validId(mediaId) || !['movie', 'episode'].includes(mediaType) || !/^[a-z]{2}$/.test(targetLanguage)
+        || !validSubtitleId(track?.id) || !['embedded', 'external'].includes(track.source)
+        || track.forced !== false || typeof track.hi !== 'boolean'
+        || (track.source === 'external' && (typeof track.path !== 'string' || !track.path.trim()))) fail('subtitles', 'INVALID_IDS');
+      const writeError = (code, httpStatus, uncertain) => {
+        throw Object.assign(new Error(`[${name}] PATCH /api/subtitles failed: ${httpStatus ? `HTTP ${httpStatus}` : code}.`),
+          { operation: 'PATCH /api/subtitles', code, uncertain, ...(httpStatus ? { httpStatus } : {}) });
+      };
+      let result;
+      try {
+        result = await sdk.applySubtitleMods({ redirect: 'error', query: { action: 'translate', type: mediaType, id: mediaId,
+          language: targetLanguage, forced: 'False', hi: track.hi ? 'True' : 'False',
+          ...(track.source === 'embedded' ? { subtitles_id: track.id } : { path: track.path }),
+        } });
+      } catch (error) {
+        // Never retain raw SDK errors: they can contain query paths or credentials.
+        const timeout = ['AbortError', 'TimeoutError'].includes(error?.name)
+          || (error?.code === 'CONNECTION_ERROR' && /^Request timed out after \d+ms$/.test(error.message));
+        writeError(timeout ? 'TIMEOUT' : 'NETWORK_ERROR', undefined, true);
+      }
+      if (result?.response?.status === 204 && result.error === undefined) return { accepted: true, httpStatus: 204 };
+      const status = result?.response?.status;
+      if (Number.isInteger(status) && status >= 400 && status <= 599) writeError('HTTP_ERROR', status, status >= 500 || status === 408);
+      // 200/202, invalid responses and lost responses cannot confirm acceptance.
+      const error = result?.error;
+      const timeout = ['AbortError', 'TimeoutError'].includes(error?.name)
+        || (error?.code === 'CONNECTION_ERROR' && /^Request timed out after \d+ms$/.test(error.message));
+      const code = error?.cause?.code ?? error?.code;
+      writeError(timeout ? 'TIMEOUT' : !result?.response && error ? (safeCodes.has(code) ? code : 'NETWORK_ERROR') : 'UNCONFIRMED_RESPONSE',
+        Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined, true);
+    },
     async getSubtitleVisibility() {
       // The official settings GET is hidden from Swagger and has no named
       // BazarrClient binding. Reuse Tsarr's public core transport, not private
@@ -136,10 +180,11 @@ export function createBazarrClient(instance, { timeoutMs = 30_000 } = {}) {
 // Format only controlled structural metadata, never native exception messages.
 export function describeBazarrError(error) {
   const operations = ['system/status', 'system/languages', 'system/languages/profiles', 'system/settings', 'movies', 'series', 'episodes', 'movies/wanted', 'episodes/wanted', 'subtitles'].map((path) => `GET /api/${path}`);
+  operations.push('PATCH /api/subtitles');
   const operation = operations.includes(error?.operation) ? error.operation : 'Bazarr read';
   if (Number.isInteger(error?.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599) {
     return `${operation}: HTTP ${error.httpStatus} ${STATUS_CODES[error.httpStatus] ?? ''}`.trim();
   }
-  const codes = [...safeCodes, 'TIMEOUT', 'INVALID_JSON', 'INVALID_RESPONSE', 'NETWORK_ERROR', 'COLLECTION_CHANGED', 'INCOMPLETE_PAGINATION', 'REPEATED_PAGINATION_ITEM', 'INVALID_IDS', 'REPEATED_EPISODE', 'UNEXPECTED_MEDIA_ID', 'SERIES_OR_EPISODE_IDS_REQUIRED'];
+  const codes = [...safeCodes, 'TIMEOUT', 'INVALID_JSON', 'INVALID_RESPONSE', 'NETWORK_ERROR', 'COLLECTION_CHANGED', 'INCOMPLETE_PAGINATION', 'REPEATED_PAGINATION_ITEM', 'INVALID_IDS', 'UNCONFIRMED_RESPONSE', 'REPEATED_EPISODE', 'UNEXPECTED_MEDIA_ID', 'SERIES_OR_EPISODE_IDS_REQUIRED'];
   return `${operation}: ${codes.includes(error?.code) ? error.code : 'connection, configuration or response error'}`;
 }
