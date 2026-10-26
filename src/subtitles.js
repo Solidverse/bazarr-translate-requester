@@ -30,10 +30,26 @@ export function subtitleLanguage(track, resolve) {
 }
 export const validSubtitleId = (id) => (Number.isSafeInteger(id) && id > 0) || (typeof id === 'string' && /^[1-9]\d*$/.test(id));
 const priority = (track) => (track.source === 'embedded' ? 0 : 2) + Number(track.hi);
-const tieKey = (track) => JSON.stringify([typeof track.id, track.id, track.path ?? '', track.embedded_track_id ?? null]);
+function numericId(value) {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (typeof value === 'string' && /^\d+$/.test(value)) return BigInt(value);
+  return null;
+}
+function compareIds(a, b) {
+  const left = numericId(a), right = numericId(b);
+  if (left === null) return right === null ? 0 : 1;
+  if (right === null) return -1;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+const tieKey = (track) => JSON.stringify([typeof track.id, track.id, track.path ?? '',
+  typeof track.embedded_track_id, track.embedded_track_id ?? null, track.language ?? '', track.codec ?? '', track.format ?? '']);
 export function prioritizeTracks(tracks) {
-  // ID order is only a reproducible tie break, never a quality score.
-  return [...tracks].sort((a, b) => priority(a) - priority(b) || (tieKey(a) < tieKey(b) ? -1 : tieKey(a) > tieKey(b) ? 1 : 0));
+  // Embedded ties follow actual stream order; DB IDs are a separate fallback.
+  // BigInt comparisons preserve numeric-string ordering without precision loss.
+  return [...tracks].sort((a, b) => priority(a) - priority(b)
+    || (a.source === 'embedded' ? compareIds(a.embedded_track_id, b.embedded_track_id) : 0)
+    || compareIds(a.id, b.id)
+    || (tieKey(a) < tieKey(b) ? -1 : tieKey(a) > tieKey(b) ? 1 : 0));
 }
 
 export function profileLanguageVisibility(profileId, profiles, translation, resolve) {

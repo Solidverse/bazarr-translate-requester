@@ -199,7 +199,10 @@ tracks, missing/ambiguous database IDs and unsupported formats are excluded.
 
 The deterministic priority policy is embedded normal, embedded HI, external normal,
 external HI. Embedded-only mode excludes every external source, but never affects
-target detection. Equal-priority sources use a stable typed-ID/path tie break;
+target detection. Equal-priority embedded sources sort by numeric stream ID, then numeric database
+ID; external sources sort by numeric database ID. Missing values follow valid
+numeric values, with deterministic typed-ID/path metadata as the final fallback.
+Numeric strings are compared numerically without changing the stored IDs.
 ID order does not imply better quality. All safely eligible tracks appear in YAML,
 with one `selectedSubtitleId`. IDs retain their API type.
 

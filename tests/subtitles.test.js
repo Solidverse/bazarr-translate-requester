@@ -129,3 +129,56 @@ test('profile visibility resolves configured ISO aliases and ignores subtitle-ki
   assert.equal(profileLanguageVisibility(7, null, translation, resolve).reason, 'language profiles unavailable');
   assert.equal(profileLanguageVisibility(7, new Map([[7, { items: '[]' }]]), translation, resolve).reason, 'invalid profile items');
 });
+
+const embeddedTrack = (id, stream, hi = false) => ({ id, embedded_track_id: stream, source: 'embedded', hi });
+const externalTrack = (id, path = '/source.srt', hi = false) => ({ id, path, source: 'external', hi });
+function assertStableOrder(input, expected) {
+  const before = structuredClone(input);
+  for (const order of [input, [...input].reverse(), [...input.slice(1), input[0]]]) assert.deepEqual(prioritizeTracks(order), expected);
+  assert.deepEqual(input, before, 'Sorting must not mutate the API array');
+}
+
+test('embedded ties follow numeric stream IDs rather than subtitle database IDs', () => {
+  const tracks = [embeddedTrack(1, 10), embeddedTrack(99, 9), embeddedTrack(500, 0), embeddedTrack(2, 2)];
+  assertStableOrder(tracks, [tracks[2], tracks[3], tracks[1], tracks[0]]);
+});
+
+test('mixed numeric and numeric-string stream IDs sort numerically', () => {
+  const tracks = [embeddedTrack('1', '10'), embeddedTrack(2, 9), embeddedTrack('9', '2')];
+  assertStableOrder(tracks, [tracks[2], tracks[1], tracks[0]]);
+});
+
+test('external ties sort numeric database IDs without converting the stored values', () => {
+  const tracks = [externalTrack('10'), externalTrack(9), externalTrack('2'), externalTrack('9007199254740993'), externalTrack('9007199254740992')];
+  assertStableOrder(tracks, [tracks[2], tracks[1], tracks[0], tracks[4], tracks[3]]);
+});
+
+test('equal or missing embedded streams fall back to numeric DB IDs and deterministic metadata', () => {
+  const tracks = [embeddedTrack('10', 2), embeddedTrack(9, '2'), embeddedTrack('3', undefined), embeddedTrack(2, null), embeddedTrack(1, 'unknown')];
+  assertStableOrder(tracks, [tracks[1], tracks[0], tracks[4], tracks[3], tracks[2]]);
+});
+
+test('equal or unavailable external DB IDs have deterministic path and type fallbacks', () => {
+  const tracks = [externalTrack('9', '/b.srt'), externalTrack('9', '/a.srt'), externalTrack(9, '/c.srt'),
+    externalTrack(undefined, '/b.srt'), externalTrack(undefined, '/a.srt')];
+  assertStableOrder(tracks, [tracks[2], tracks[1], tracks[0], tracks[4], tracks[3]]);
+});
+
+test('source and HI priorities still outrank stream and database ID ordering', () => {
+  const tracks = [externalTrack(1, '/a.srt', true), externalTrack('2'), embeddedTrack(3, 0, true), embeddedTrack('99', 100)];
+  assertStableOrder(tracks, [tracks[3], tracks[2], tracks[1], tracks[0]]);
+});
+
+test('selection uses the first sorted database ID and retains every eligible track for manual review', () => {
+  const tracks = [raw({ id: '10', path: null, embedded_track_id: 9 }),
+    raw({ id: 900, path: null, embedded_track_id: 2 }), raw({ id: '9', path: null, embedded_track_id: 10 }), raw({ id: 1 })];
+  const selected = evaluate(tracks);
+  assert.equal(selected.selectedSubtitleId, 900);
+  assert.deepEqual(selected.tracks.map((t) => t.id), [900, '10', '9', 1]);
+  assert.equal(selected.tracks.filter((t) => t.id === selected.selectedSubtitleId).length, 1);
+  assert.deepEqual(evaluate([...tracks].reverse()), selected);
+  assert.equal(selected.tracks.length, tracks.length);
+  assert.ok(selected.tracks.some((t) => t.id === '9'), 'Alternative DB IDs remain available for manual selection');
+  const external = evaluate([raw({ id: '10' }), raw({ id: 9 })]);
+  assert.equal(external.selectedSubtitleId, 9); assert.deepEqual(external.tracks.map((t) => t.id), [9, '10']);
+});
