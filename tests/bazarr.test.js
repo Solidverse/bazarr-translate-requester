@@ -195,3 +195,56 @@ test('two simultaneous SDK objects keep authentication separate during interleav
   await a.getMovies(); await b.getMovies(); await a.getSeries();
   assert.deepEqual(calls, [['first', 'FIRST'], ['second', 'SECOND'], ['first', 'FIRST']]);
 });
+
+for (const [value, complete] of [[false, true], [true, false], ['false', false], [undefined, false], [null, false]]) {
+  test(`visibility GET reduces settings to booleans only: ${JSON.stringify(value)}`, async () => {
+    const { client, calls } = setup(() => Response.json({ general: { embedded_subs_show_desired: value },
+      auth: { apikey: 'OTHER_SECRET' }, sonarr: { apikey: 'SONARR_SECRET' } }));
+    const result = await client.getSubtitleVisibility();
+    assert.equal(result.complete, complete);
+    assert.deepEqual(Object.keys(result).sort(), ['complete', 'showOnlyDesiredLanguages']);
+    assert.doesNotMatch(JSON.stringify(result), /SECRET|apikey|sonarr/);
+    assert.equal(calls.length, 1); assert.equal(calls[0].url.pathname, '/proxy/bazarr/api/system/settings');
+    assert.equal(calls[0].init.method, 'GET'); assert.equal(calls[0].init.headers['X-API-KEY'] === instance.apiKey, true);
+    assert.equal(calls[0].url.search, '');
+  });
+}
+for (const status of [403, 404, 500]) {
+  test(`visibility HTTP ${status} does not expose settings bodies`, async () => {
+    const { client } = setup(() => new Response('OTHER_SECRET private settings', { status }));
+    await assert.rejects(client.getSubtitleVisibility(), (error) => error.httpStatus === status
+      && !/OTHER_SECRET|private settings/.test(error.message + JSON.stringify(error)));
+  });
+}
+
+test('visibility timeout and invalid JSON use safe diagnostics without settings payloads', async () => {
+  const stalled = setup((_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })), { timeoutMs: 10 });
+  await assert.rejects(stalled.client.getSubtitleVisibility(), /TIMEOUT/);
+  const invalid = setup(() => new Response('{"apikey":"OTHER_SECRET"'));
+  await assert.rejects(invalid.client.getSubtitleVisibility(), (error) => error.code === 'INVALID_JSON'
+    && !/OTHER_SECRET|apikey/.test(error.message + JSON.stringify(error)));
+});
+
+test('language profiles use the SDK bare-array contract and authenticated read-only endpoint', async () => {
+  const profiles = [{ profileId: 7, name: 'Example', items: [{ language: 'eng', id: 1, hi: 'False', forced: 'False' }, { language: 'nl', id: 2 }] }];
+  const { client, calls } = setup(() => Response.json(profiles));
+  assert.deepEqual(await client.getLanguageProfiles(), profiles);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url.pathname, '/proxy/bazarr/api/system/languages/profiles');
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.headers['X-API-KEY'] === instance.apiKey, true);
+  assert.equal(calls[0].url.search, '');
+});
+for (const response of [null, { data: [] }, [{ profileId: '7', items: [] }], [{ profileId: 7, items: '[]' }], [{ profileId: 7, items: [] }, { profileId: 7, items: [] }]]) {
+  test(`invalid profile response fails safely: ${JSON.stringify(response)}`, async () => {
+    const { client } = setup(() => Response.json(response));
+    await assert.rejects(client.getLanguageProfiles(), (error) => error.code === 'INVALID_RESPONSE');
+  });
+}
+test('language-profile API errors retain operation/status without exposing response bodies', async () => {
+  const { client, calls } = setup(() => new Response('SECRET_PROFILE_BODY', { status: 403 }));
+  await assert.rejects(client.getLanguageProfiles(), (error) => error.httpStatus === 403
+    && error.operation === 'GET /api/system/languages/profiles'
+    && !error.message.includes('SECRET_PROFILE_BODY'));
+  assert.equal(calls.length, 1);
+});

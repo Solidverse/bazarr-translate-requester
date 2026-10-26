@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { parse } from 'yaml';
+import { languageCode } from './subtitles.js';
 
 const nonEmpty = (value) => typeof value === 'string' && value.trim().length > 0;
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -49,8 +50,10 @@ export async function loadConfig(path = '/config/config.yml') {
     }
     if (!object(instance.translation)) invalid(`${field}.translation`, 'must be a mapping.');
     for (const language of ['sourceLanguage', 'targetLanguage']) {
-      if (!nonEmpty(instance.translation[language])) invalid(`${field}.translation.${language}`, 'must be a non-empty string.');
+      if (!languageCode(instance.translation[language])) invalid(`${field}.translation.${language}`, 'must be a two- or three-letter language identifier; support is checked against Bazarr during generation.');
     }
+    if (instance.translation.onlyEmbedded === undefined) instance.translation.onlyEmbedded = true;
+    if (typeof instance.translation.onlyEmbedded !== 'boolean') invalid(`${field}.translation.onlyEmbedded`, 'must be a boolean.');
   });
   if (!object(config.logging) || !['debug', 'info', 'warn', 'error'].includes(config.logging.level)) {
     invalid('logging.level', 'must be debug, info, warn, or error.');

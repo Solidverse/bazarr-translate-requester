@@ -4,7 +4,7 @@ import { RadarrClient } from 'tsarr/radarr';
 import { createBazarrClient, describeBazarrError } from './bazarr.js';
 
 // Only controlled diagnostics leave this module, never SDK errors, URLs or bodies.
-function describeStatusError(error) {
+export function describeStatusError(error) {
   const status = error?.httpStatus;
   if (Number.isInteger(status) && status >= 100 && status <= 599) return `HTTP ${status} ${STATUS_CODES[status] ?? ''}`.trim();
   const code = error?.cause?.code ?? error?.code;

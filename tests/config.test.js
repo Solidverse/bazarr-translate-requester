@@ -120,3 +120,21 @@ test('each environment preserves its own translation and connection settings', a
   assert.equal(loaded.instances[1].translation.targetLanguage, 'de');
   assert.notEqual(loaded.instances[0].bazarr.url, loaded.instances[1].bazarr.url);
 });
+
+test('onlyEmbedded defaults to true, accepts booleans and rejects other values', async (t) => {
+  const path = await fixture(t);
+  const config = await loadConfig(path);
+  for (const value of [undefined, true, false, 'true', null, 1]) {
+    config.instances[0].translation.onlyEmbedded = value;
+    await writeFile(path, stringify(config));
+    if (value === undefined || typeof value === 'boolean') assert.equal((await loadConfig(path)).instances[0].translation.onlyEmbedded, value ?? true);
+    else await assert.rejects(loadConfig(path), /onlyEmbedded/);
+  }
+});
+test('language identifiers must be two or three letters and are never silently defaulted', async (t) => {
+  const path = await fixture(t); const config = await loadConfig(path);
+  for (const value of [undefined, '', 'English', 'pt-BR', 12]) {
+    config.instances[0].translation.sourceLanguage = value;
+    await writeFile(path, stringify(config)); await assert.rejects(loadConfig(path), /sourceLanguage/);
+  }
+});

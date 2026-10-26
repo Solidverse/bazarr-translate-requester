@@ -30,7 +30,7 @@ are available on series records (`title`) and wanted episode records (`seriesTit
 `subtitles` can contain `embedded_track_id` and a null `path` when already indexed;
 server settings can hide some embedded entries. No ffprobe cache is returned by
 this client and no scans, provider queries or extraction fallbacks are performed.
-No inference about Dutch-only eligibility is made from the wanted lists.
+Wanted counts do not establish eligibility for any particular configured target language.
 
 ## SDK compatibility
 
@@ -53,4 +53,61 @@ returns audio, embedded and external track references. The official
 can probe media and update its cache when cached metadata is missing; there is no
 cache-only query option. Inspection does not invoke
 it or any scan/provider operation; indexed subtitles are preserved from library
-records. No eligibility rules are implemented.
+records. Generation eligibility is described below; inspection does not filter its counts.
+
+## Phase 4B generation contracts and limitations
+
+- [Language catalog](https://github.com/morpheus65535/bazarr/blob/master/bazarr/api/system/languages.py): GET `/api/system/languages` returns a bare array of `code2`/`code3`/`name` records. Exact server codes take precedence over ICU ISO aliases; custom variants are not collapsed.
+- [Indexed subtitle model](https://github.com/morpheus65535/bazarr/blob/master/bazarr/api/swaggerui.py) and [database mapping](https://github.com/morpheus65535/bazarr/blob/master/bazarr/app/database.py): subtitle database `id` and `embedded_track_id` differ; the library model exposes no embedded codec. Generation preserves unknown embedded codecs and valid database IDs; known bitmap sources are excluded without probing.
+- [Postprocessing](https://github.com/morpheus65535/bazarr/blob/master/bazarr/api/utils.py) can hide embedded languages outside desired profile languages. The generator reads GET `/api/system/settings`; unfiltered visibility or a verified assigned language profile establishes per-media source/target visibility. Profile missing-subtitle lists do not authorize target absence.
+- [Translation source resolution](https://github.com/morpheus65535/bazarr/blob/master/bazarr/subtitles/tools/translate/core/translator_utils.py): external sources use their exact `path`; embedded sources use database `subtitles_id`. Supported external text extensions are `.srt`, `.ass`, `.ssa`, `.vtt`. No translation call is made in Phase 4B.
+- Installed Tsarr 2.16.3 provides Radarr `getMovies()` and Sonarr `getEpisodes(seriesId)` / `getEpisodeFiles(seriesId)`. [Radarr current file resources](https://github.com/Radarr/Radarr/blob/develop/src/Radarr.Api.V3/MovieFiles/MovieFileResource.cs) expose `movieId`, `id`, `dateAdded`; [Sonarr current file resources](https://github.com/Sonarr/Sonarr/blob/develop/src/Sonarr.Api.V3/EpisodeFiles/EpisodeFileResource.cs) expose `seriesId`, `id`, `dateAdded`, joined from episode `episodeFileId`.
+
+These contracts were checked against official source and the installed SDK. Tests
+use mocked HTTP transports and do not establish live generator/translation behavior.
+
+## Generator review: embedded IDs and complete indexed visibility
+
+The official [settings GET](https://github.com/morpheus65535/bazarr/blob/master/bazarr/api/system/settings.py)
+returns settings without changing them. [Postprocessing](https://github.com/morpheus65535/bazarr/blob/master/bazarr/api/utils.py)
+filters embedded languages only when `general.embedded_subs_show_desired` is true.
+Generation reads this setting before and after an instance's collection. When it
+is false, indexed languages are unfiltered. When true, the generator retrieves
+[language profiles](https://github.com/morpheus65535/bazarr/blob/master/bazarr/api/system/languages_profiles.py)
+with Tsarr `getLanguageProfiles()` once per instance. The response is a bare array;
+[database mapping](https://github.com/morpheus65535/bazarr/blob/master/bazarr/app/database.py)
+decodes `items` to objects and `get_desired_languages()` reads each item's `language`.
+
+Visibility is then checked per movie's `profileId` or episode's parent series
+`profileId`. Both configured languages must explicitly resolve to languages in that
+profile. Kind/cutoff flags do not narrow the upstream display-language filter.
+Missing/unknown/insufficient profiles remain uncertain; visible target subtitles
+remain definite skips. `missing_subtitles` is never visibility evidence. Profile IDs
+and language resolution remain scoped to the current instance. A profile lookup
+failure does not become an empty authoritative profile list.
+
+The global setting is rechecked before publication, while profiles are retrieved
+only once. This is an indexed run-local snapshot, not a disk scan or an atomic view
+across simultaneous library/profile/settings changes. Future submission must
+revalidate. No additional setting or profile changes are sent to Bazarr.
+
+Settings are hidden from Swagger, hence absent from Tsarr 2.16.3's named Bazarr API.
+The adapter uses public `createServarrClient` from `tsarr` and its `getFetch()` /
+`getHeaders()` for the single official GET, then discards every setting except the
+visibility flag. Native JSON decoding is limited to that operation; no independent
+HTTP client, retry policy or private SDK access is introduced. Settings may contain
+credentials; raw settings and transport failures never escape into diagnostics/YAML.
+
+[Embedded translation](https://github.com/morpheus65535/bazarr/blob/master/bazarr/api/subtitles/subtitles.py)
+uses `subtitles_id`, while the resolver checks its `embedded_track_id` separately.
+The server handles extraction; 415 is an unsupported image-based response documented
+by the route. Unknown embedded codecs remain eligible as unknown, not as verified
+text. No translation/extraction/probing is performed by generation. Existing mocked
+Tsarr tests verify PATCH query preservation; this is not proof of a particular
+installed server's translation behavior. The target version is intentionally not
+assumed; live compatibility will be verified separately.
+
+Manual action is not required when the assigned profile confirms both configured
+languages, even with **Show Only Desired Languages** enabled. An unresolved profile
+may be corrected manually, or the display filter can optionally be disabled. The
+application never changes either, performs a rescan or triggers a provider search.

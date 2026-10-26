@@ -7,13 +7,11 @@ custom HTTP server or permanent production process.
 
 ## Current status
 
-Phase 2 provides YAML loading, multi-instance validation, credential-safe structured
-logging and manual CLI routing. Phase 4A groups each Bazarr environment with
-optional Sonarr/Radarr connections and its own translation settings. Read-only inspection uses Tsarr. **Translation functionality is not implemented yet.**
-Both operation scaffolds validate configuration, identify the requested operation,
-report that it is not implemented and exit successfully. Neither connects to Bazarr
-nor creates or processes a request file. Actual configuration/command errors exit
-nonzero. No translation requests happen automatically, including in development.
+Phase 4B implements language-agnostic request generation and preview, manual YAML
+review, deterministic source selection and optional current-file age filtering.
+`run:request` remains a scaffold; no translations are submitted. Indexed embedded
+tracks can be selected with unknown codecs; see visibility and compatibility notes below.
+The app stays on-demand, database-free and credential-safe.
 
 ## Configuration
 
@@ -39,6 +37,7 @@ instances:
     translation:
       sourceLanguage: en
       targetLanguage: nl
+      onlyEmbedded: true
 logging:
   level: info
 dryRun: true
@@ -80,7 +79,7 @@ manual migration before running commands that load it.
 ```bash
 npm start                 # usage, no configuration required
 node src/index.js help    # usage
-npm run run:generate      # generate scaffold, loads /config/config.yml
+npm run run:generate      # generate a review batch from indexed metadata
 npm run run:request       # request scaffold, loads /config/config.yml
 npm run bazarr:inspect   # indexed Bazarr library and wanted metadata
 npm run services:inspect # status/version of all configured services
@@ -133,7 +132,7 @@ forwards command arguments; supported npm application aliases are dispatched
 directly to Node so it receives container signals as PID 1. The default command
 prints help and exits. No keep-alive, restart policy or background services are
 needed. Do not use privileged mode, host networking, published ports or Docker
-socket access. No network access is needed for the current scaffolds.
+socket access. Generation requires read-only API access; the request scaffold does not.
 
 Production defaults to PUID `99`, PGID `100`; override with `-e PUID=1000 -e PGID=1000`
 if necessary. Initialization briefly runs as root, validates positive numeric IDs,
@@ -155,34 +154,183 @@ The existing GitHub Actions workflow remains unchanged: offline tests, productio
 build, main publication with `latest`, version tags and commit tags, authenticated
 with `GITHUB_TOKEN`. No release-only publishing requirement is introduced.
 
-## Future temporary batch workflow
+## Generate → Review → Request → Cleanup
 
-The intended user-controlled workflow is:
+```bash
+npm run run:generate -- --preview
+npm run run:generate -- --instance HD --type movie
+npm run run:generate -- --type series --instance HD --series 123 --min-age 7
+```
 
-1. **Generate:** find missing normal Dutch subtitles with suitable embedded English
-   source subtitles across enabled Bazarr instances; create `/config/requests.yml`.
-2. **Review:** manually remove entries you do not want translated.
-3. **Request:** revalidate and submit the remaining entries through Bazarr.
-4. **Cleanup:** remove accepted entries, retain failures for retry, and delete the
-   file once empty. Never overwrite an existing unprocessed batch.
+All arguments are optional. No arguments selects every enabled instance and both
+movies and episodes. The configuration is `/config/config.yml`; output is
+`requests.yml` beside that configuration file (also when a caller uses a custom
+config path). Generating this local review file is allowed with `dryRun: true`.
+Generation never submits translations, regardless of dry-run.
 
-Example of the future batch format:
+| Option | Meaning |
+| --- | --- |
+| `--type movie` | Movies only |
+| `--type series` | Individual episodes only |
+| `--instance NAME` | One enabled instance, selected by its exact configured name |
+| `--series ID` | One Sonarr series ID as indexed in Bazarr; implies series mode |
+| `--min-age DAYS` | Nonnegative integer; current video file must be this many 24-hour days old |
+| `--preview` | Same selection and filtering, with candidate details in logs and no file changes |
+
+`--series` needs exactly one enabled instance or an explicit `--instance`, preventing
+cross-instance numeric-ID ambiguity. Unknown/duplicate flags and incompatible
+arguments fail. There are no title limits. The development watcher still starts
+with help, never with generation; invoke commands explicitly inside the container.
+
+### Languages, eligibility and source priority
+
+Each instance uses its own `sourceLanguage`, `targetLanguage` and `onlyEmbedded`
+(default `true`, must be boolean). The example language pair is only an example.
+Two- and three-letter codes are resolved using that instance's read-only Bazarr
+language catalog, with ICU ISO aliases. Unsupported codes and identical resolved
+source/target languages fail. Bazarr's custom regional identifiers remain distinct;
+region/script tags are rejected rather than silently reduced to a base language.
+Human language names and filenames are never used to infer language.
+
+**Any indexed target-language subtitle blocks generation**, including forced, HI,
+embedded, external and image-based targets. Unknown language metadata is not treated
+as absence. Only existing source-language tracks are considered. Forced source
+tracks, missing/ambiguous database IDs and unsupported formats are excluded.
+
+The deterministic priority policy is embedded normal, embedded HI, external normal,
+external HI. Embedded-only mode excludes every external source, but never affects
+target detection. Equal-priority sources use a stable typed-ID/path tie break;
+ID order does not imply better quality. All safely eligible tracks appear in YAML,
+with one `selectedSubtitleId`. IDs retain their API type.
+
+### Verified indexed-metadata limitations
+
+The official indexed subtitle model exposes subtitle database `id`,
+`embedded_track_id`, language, flags, path and size, but usually no embedded codec.
+**An indexed embedded source with a valid database ID and stream ID is eligible even
+when its codec is unknown.** YAML preserves `codec: unknown` and the stream ID
+separately. Selection and the four-level priority policy apply normally in
+embedded-only mode. Explicitly known bitmap codecs (PGS/VobSub/DVB/XSub) and forced
+source tracks remain excluded. Unknown does not mean verified text: a later
+translation may still be rejected by Bazarr. No probing or extraction occurs here.
+
+The official `PATCH /api/subtitles` accepts `action=translate` with a subtitle
+**database** `subtitles_id` for embedded sources and handles extraction internally.
+Its implementation documents HTTP 415 for unsupported image-based tracks; failures
+can also occur during the server's queued work. Tsarr's JavaScript serialization
+preserves this parameter, as verified with mocked transport. No particular target
+Bazarr version is assumed and no live translation compatibility is claimed.
+Phase 5 must handle unsupported tracks and server errors safely.
+
+With `onlyEmbedded: false`, existing external `.srt`, `.ass`, `.ssa` and `.vtt`
+tracks with valid database IDs and paths are also eligible. External translation
+uses the exact indexed path; `selectedSubtitleId` still refers to the listed
+subtitle database record for review and revalidation. Ambiguous `.sub` and unknown
+external formats remain excluded. See [API notes](docs/README.md) for sources.
+
+Bazarr's **Show Only Desired Languages** setting can hide embedded languages from
+library responses. Profile-based `missing_subtitles` is not our target-language
+requirement and is never used as visibility evidence. The generator reads
+GET `/api/system/settings` and determines visibility **per media item**:
+
+- When `general.embedded_subs_show_desired` is explicitly `false`, all indexed
+  subtitle languages are visible and no language-profile request is needed.
+- When it is explicitly `true`, GET `/api/system/languages/profiles` is retrieved
+  **once per instance**, through Tsarr `getLanguageProfiles()`. The assigned profile
+  must explicitly include both configured source and target languages after resolving
+  their identifiers with that instance's existing language resolver.
+- Movies use their own `profileId`; episodes use the parent series' `profileId`.
+  Episode-level profile fields never substitute for an absent parent assignment.
+- Missing/unknown profiles, insufficient languages, inaccessible profile data or an
+  unknown setting leave target absence uncertain. Debug logs identify the media,
+  assigned profile ID and unresolved condition. An observed target subtitle always
+  prevents generation, including forced/HI targets, regardless of profile visibility.
+
+The endpoint returns a bare array of `{ profileId, items: [{ language, ... }] }`.
+Profile item forced/HI/cutoff flags do not narrow Bazarr's display-language filter;
+source-track forced/HI rules still apply during selection. No languages are inferred
+from profile names or language-equals expansions, and no language pair is hardcoded.
+
+**No setting change is required for media with a verified profile containing both
+languages.** The setting may stay enabled. For unresolved profiles, correct their
+assignments/languages manually or optionally disable the display filter; the app
+never modifies Bazarr settings. It rechecks visibility after collection and aborts
+publication if previously established visibility can no longer be confirmed.
+Profiles are a run-local snapshot, not a disk scan or an atomic transaction across
+concurrent profile, setting and library changes; Phase 5 must revalidate fresh data.
+
+The settings GET is an official authenticated read-only endpoint hidden from Swagger;
+Tsarr has no named Bazarr method for it. A narrow adapter uses Tsarr's publicly
+exported core transport (authentication/timeout) and immediately reduces the response
+to visibility booleans. The settings body can contain unrelated service credentials:
+it is never returned, logged or stored in the batch. No private SDK fields or
+separate HTTP client are used.
+
+### Optional age filtering
+
+Without `--min-age`, no Sonarr/Radarr age client is created or queried. With it,
+movies require the current instance's Radarr, and episodes its Sonarr. Missing
+required integrations or failed library queries abort the whole generation without
+publishing partial results. An individual unknown/mismatched file or invalid/future
+timestamp excludes that item and is counted separately.
+
+Radarr movies are fetched once and use current `movieFile.id`/`movieId` and
+`movieFile.dateAdded`, checking `movieFileId` when supplied. Sonarr fetches episodes
+and episode files once per relevant series and joins `episodeFileId` to the current
+file's `id`, checking `seriesId`. Only file `dateAdded` is used: release dates, air
+dates and original library addition dates do not qualify a replacement file. A
+single reference time is captured per run, and the minimum-age boundary is inclusive.
+IDs are never looked up in another instance.
+
+### Review YAML and batch protection
+
+Example of an indexed embedded-source batch:
 
 ```yaml
 requests:
   - instance: HD
     type: movie
-    title: "Example Movie (2025)"
+    title: Example Movie (2025)
     mediaId: 123
-  - instance: HD
-    type: episode
-    title: "Example Series S01E01"
-    mediaId: 456
+    sourceLanguage: es
+    targetLanguage: de
+    selectedSubtitleId: 789
+    tracks:
+      - id: 789
+        source: embedded
+        language: es
+        hi: false
+        forced: false
+        codec: unknown
+        embedded_track_id: 2
+      - id: 790
+        source: embedded
+        language: es
+        hi: true
+        forced: false
+        codec: unknown
+        embedded_track_id: 3
 ```
 
-This file is temporary, externally mounted and manually editable. It is not a
-permanent database or translation history. **Batch generation, translation
-submission and cleanup are future work and are not performed by this phase.**
+Episode entries use `type: episode` and also carry `seriesId`. The batch preserves
+configured source/target codes, while each track carries its resolved Bazarr
+language code. Change `selectedSubtitleId` to another listed track's ID, preserving
+its YAML type, or delete entire entries you do not want. Do not add approval/status
+fields. One media item appears at most once per instance. Output order follows
+instance order and stable media-ID/track ordering.
+
+Existing batches, including symlinks, are never replaced, merged or deleted.
+Preview works even with an existing batch. No candidates means no empty file.
+Publication writes and syncs a private temporary file, then atomically hard-links
+it to `requests.yml`, preventing concurrent generators from replacing a batch.
+Temporary files are removed afterwards. Filesystems lacking hard-link support fail
+clearly; no unsafe overwrite fallback is used. Required API failures abort publishing;
+normal metadata exclusions are logged and summarized by instance.
+
+The request command is **not implemented**. Phase 5 must validate the selected ID
+against the list and fresh Bazarr metadata, confirm current language settings and
+missing target, submit at most one translation, remove accepted entries, retain
+failures and delete the batch when empty. None of those actions happen now.
 
 ## Read-only service inspection
 
@@ -211,6 +359,8 @@ Supported methods in `src/bazarr.js`:
 | Method | Official GET endpoint | Response / pagination |
 | --- | --- | --- |
 | `getStatus()` | `/api/system/status` | `data` object |
+| `getLanguages()` | `/api/system/languages` | Bare language-catalog array |
+| `getLanguageProfiles()` | `/api/system/languages/profiles` | Bare profile array; fetched once per filtered instance |
 | `getMovies()` | `/api/movies` | `data` array and `total`; `start`/`length` |
 | `getSeries()` | `/api/series` | `data` array and `total`; `start`/`length` |
 | `getEpisodes({ seriesIds })` or `({ episodeIds })` | `/api/episodes` | `data` array; required `seriesid[]` or `episodeid[]` |
@@ -233,7 +383,8 @@ It follows redirects by default; configure the final trusted Bazarr URL directly
 Include any reverse-proxy prefix (for example `https://example.org/bazarr`).
 
 SDK methods used: `getSystemStatus`, `getMovies`, `getSeries`, `getEpisodes`,
-`getMoviesWanted`, `getEpisodesWanted`, and the explicitly requested `getSubtitles`.
+`getMoviesWanted`, `getEpisodesWanted`, `getLanguages`, `getLanguageProfiles`, and
+the explicitly requested `getSubtitles`.
 Metadata retains upstream names: `radarrId`, `sonarrSeriesId`, `sonarrEpisodeId`,
 titles, paths, year, monitored flags, `subtitles` and `missing_subtitles` when supplied.
 Empty collections are valid; malformed, failed or incomplete responses are errors.
@@ -290,7 +441,7 @@ development documentation. No documentation is downloaded during either command.
 Actual Bazarr connectivity will be tested separately after configuration. Use real
 credentials only in the ignored external config, never in source or committed docs.
 The checked-in config example uses placeholders; leave those unchanged during
-offline development. `generate` and `request` never connect to Bazarr in this phase.
+offline development. `request` remains a scaffold; generation uses only the indexed read endpoints described above.
 
 ### No subtitle searches or translation actions
 
@@ -299,15 +450,5 @@ They do **not** request a provider search. The application exposes only named
 read methods and never accesses `/api/providers/movies`, `/api/providers/episodes`, scan/refresh,
 download or translation actions. Sonarr/Radarr access is limited to system status
 through `services:inspect`; Bazarr library inspection never initializes those clients.
-`generate` and `request` remain nonfunctional scaffolds: neither creates or processes
-`requests.yml`. Only the two inspection commands read service APIs during this
-phase. The application remains short-lived and database-free.
-
-## Future media age filtering
-
-A future generator may read Radarr movie-file or Sonarr episode-file import dates,
-using only the service nested under the same instance as the Bazarr media. Identical
-numeric IDs in different environments must never be matched across instances.
-No file associations, dates, `--min-age`, selection arguments, eligibility logic,
-request generation or translation submission are implemented in Phase 4A.
-Connectivity tests with mocked transports do not prove live instance compatibility.
+`generate` creates a local review batch; `request` remains a scaffold and never
+processes it. Generation and inspection remain short-lived and database-free.

@@ -62,6 +62,33 @@ export function createBazarrClient(instance, { timeoutMs = 30_000 } = {}) {
     }
   }
   return {
+    async getSubtitleVisibility() {
+      // The official settings GET is hidden from Swagger and has no named
+      // BazarrClient binding. Reuse Tsarr's public core transport, not private
+      // SDK internals or a separate HTTP client/retry implementation.
+      const { createServarrClient } = await import('tsarr');
+      const transport = createServarrClient({ baseUrl: base.href, apiKey: key, timeout: timeoutMs });
+      const path = new URL(base.href);
+      path.pathname = `${path.pathname.replace(/\/+$/, '').replace(/\/api$/, '')}/api/system/settings`;
+      const settings = await read('system/settings', async () => {
+        const response = await transport.getFetch()(path, { method: 'GET', redirect: 'error', headers: transport.getHeaders() });
+        return response.ok ? { response, data: await response.json() } : { response, error: true };
+      });
+      // Settings can contain other services' secrets. Return only visibility.
+      const desiredOnly = settings?.general?.embedded_subs_show_desired;
+      return { complete: desiredOnly === false, showOnlyDesiredLanguages: typeof desiredOnly === 'boolean' ? desiredOnly : null };
+    },
+    async getLanguageProfiles() {
+      const result = await read('system/languages/profiles', () => sdk.getLanguageProfiles());
+      if (!Array.isArray(result) || result.some((profile) => !object(profile) || !validId(profile.profileId) || !Array.isArray(profile.items))
+        || new Set(result.map((profile) => profile.profileId)).size !== result.length) fail('system/languages/profiles', 'INVALID_RESPONSE');
+      return result;
+    },
+    async getLanguages() {
+      const result = await read('system/languages', () => sdk.getLanguages());
+      if (!Array.isArray(result)) fail('system/languages', 'INVALID_RESPONSE');
+      return result;
+    },
     async getStatus() {
       const response = await read('system/status', () => sdk.getSystemStatus());
       if (!object(response?.data) || typeof response.data.bazarr_version !== 'string' || !response.data.bazarr_version.trim()) fail('system/status', 'INVALID_RESPONSE');
@@ -108,7 +135,7 @@ export function createBazarrClient(instance, { timeoutMs = 30_000 } = {}) {
 
 // Format only controlled structural metadata, never native exception messages.
 export function describeBazarrError(error) {
-  const operations = ['system/status', 'movies', 'series', 'episodes', 'movies/wanted', 'episodes/wanted', 'subtitles'].map((path) => `GET /api/${path}`);
+  const operations = ['system/status', 'system/languages', 'system/languages/profiles', 'system/settings', 'movies', 'series', 'episodes', 'movies/wanted', 'episodes/wanted', 'subtitles'].map((path) => `GET /api/${path}`);
   const operation = operations.includes(error?.operation) ? error.operation : 'Bazarr read';
   if (Number.isInteger(error?.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599) {
     return `${operation}: HTTP ${error.httpStatus} ${STATUS_CODES[error.httpStatus] ?? ''}`.trim();

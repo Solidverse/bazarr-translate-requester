@@ -19,7 +19,7 @@ function capture(t) {
   t.mock.method(console, 'error', (line) => lines.push(line));
   return lines;
 }
-for (const operation of ['generate', 'request']) {
+for (const operation of ['request']) {
   test(`${operation} validates config, reports scaffold and makes no network or batch writes`, async (t) => {
     const { path, directory } = await fixture(t);
     const lines = capture(t);
@@ -96,6 +96,25 @@ test('all nested service keys are redacted from CLI diagnostics', async (t) => {
   const config = parse(await readFile(path, 'utf8'));
   config.instances[0].name = 'YOUR_SONARR_HD_API_KEY-YOUR_RADARR_HD_API_KEY-YOUR_BAZARR_HD_API_KEY';
   await writeFile(path, stringify(config));
-  assert.equal(await main(['generate'], { configPath: path }), 0);
+  assert.equal(await main(['generate'], { configPath: path, generate: async () => ({}) }), 0);
   assert.doesNotMatch(lines.join(), /YOUR_.*API_KEY/);
+});
+
+test('generate routes parsed arguments with nested configuration and the config path', async (t) => {
+  const { path } = await fixture(t); capture(t); let calls = 0;
+  assert.equal(await main(['generate','--instance','HD','--type','series','--series','5','--min-age','7','--preview'], { configPath: path, generate: async (config, options, dependencies) => {
+    calls++; assert.equal(config.instances[0].translation.onlyEmbedded,true);
+    assert.deepEqual(options,{type:'series',instance:'HD',seriesId:5,minAge:7,preview:true});
+    assert.equal(dependencies.configPath,path);
+  } }),0);
+  assert.equal(calls,1);
+  assert.equal(await main(['generate','--type','episode'],{configPath:path,generate:()=>assert.fail('Invalid args reached generator')}),1);
+});
+
+test('generate validation and runtime errors return nonzero and redact nested credentials', async (t) => {
+  const {path}=await fixture(t);const lines=capture(t);
+  await rm(path);assert.equal(await main(['generate'],{configPath:path}),1);
+  await writeFile(path,await readFile(new URL('../config.example.yml',import.meta.url)));
+  assert.equal(await main(['generate','--preview'],{configPath:path,generate:async()=>{throw new Error('YOUR_SONARR_HD_API_KEY generation failed');}}),1);
+  assert.match(lines.join(),/generation failed/);assert.doesNotMatch(lines.join(),/YOUR_SONARR_HD_API_KEY/);
 });

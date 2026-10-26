@@ -27,6 +27,7 @@ instances:
     translation:
       sourceLanguage: en
       targetLanguage: nl
+      onlyEmbedded: true
 
   # ----------------------------------------
   # 4K Instance
@@ -50,6 +51,7 @@ instances:
     translation:
       sourceLanguage: en
       targetLanguage: nl
+      onlyEmbedded: true
 
 # ==========================================
 # Global Settings
