@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim AS base
+FROM node:24.22.1-bookworm-slim AS base
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
@@ -7,7 +7,6 @@ COPY src/ ./src/
 
 FROM base AS development
 COPY config.example.yml ./config.example.yml
-COPY scripts/ ./scripts/
 COPY tests/ ./tests/
 ENV NODE_ENV=development
 USER node

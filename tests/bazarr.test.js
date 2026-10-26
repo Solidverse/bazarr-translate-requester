@@ -1,15 +1,24 @@
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createBazarrClient } from '../src/bazarr.js';
 import { inspectBazarr } from '../src/inspect.js';
 import { createLogger } from '../src/logger.js';
+const nativeFetch = globalThis.fetch;
+afterEach(() => { globalThis.fetch = nativeFetch; });
+function transportClient(instance, { fetchImpl, ...options }) {
+  globalThis.fetch = (request) => fetchImpl(new URL(request.url), {
+    method: request.method, headers: { 'X-API-KEY': request.headers.get('X-API-KEY') },
+    redirect: request.redirect, signal: request.signal,
+  });
+  return createBazarrClient(instance, options);
+}
 const instance = { name: 'HD', enabled: true, url: 'http://bazarr:6767/proxy/bazarr/', apiKey: 'TOP_SECRET' };
 const movie = (id) => ({ radarrId: id, title: 'Movie', year: '2025', path: '/movies/test.mkv', monitored: true, subtitles: [{ code2: 'en', path: null, embedded_track_id: 2 }], missing_subtitles: [{ code2: 'nl' }] });
 const series = (id) => ({ sonarrSeriesId: id, title: 'Series' });
 const episode = (id, sid = 1) => ({ sonarrEpisodeId: id, sonarrSeriesId: sid, title: 'Episode', season: 1, episode: 2, path: '/series/test.mkv' });
 function setup(handler, options = {}) {
   const calls = [];
-  const client = createBazarrClient(instance, { ...options, fetchImpl: async (url, init) => {
+  const client = transportClient(instance, { ...options, fetchImpl: async (url, init) => {
     calls.push({ url: new URL(url), init });
     return handler(new URL(url), init, calls.length);
   } });
@@ -20,7 +29,7 @@ test('authentication and reverse-proxy base path; original metadata is preserved
   assert.deepEqual(await client.getMovies(), data);
   assert.equal(calls[0].url.pathname, '/proxy/bazarr/api/movies');
   assert.equal(calls[0].init.method, 'GET'); assert.equal(calls[0].init.headers['X-API-KEY'], instance.apiKey);
-  assert.equal(calls[0].url.searchParams.has('apikey'), false); assert.equal(calls[0].init.redirect, 'error');
+  assert.equal(calls[0].url.searchParams.has('apikey'), false); assert.equal(calls[0].init.redirect, 'follow');
 });
 for (const [method, data] of [['getMovies', [movie(1)]], ['getSeries', [series(1)]], ['getWantedMovies', [movie(1)]], ['getWantedEpisodes', [{ sonarrEpisodeId: 1, episodeTitle: 'Episode', seriesTitle: 'Series', episode_number: '1x2', missing_subtitles: [] }]]]) {
   test(`${method} handles its data/total envelope and an empty library`, async () => {
@@ -76,7 +85,7 @@ for (const mode of ['connection', 'timeout', 'JSON', 'structure']) {
     const { client } = setup(() => {
       if (mode === 'connection') throw Object.assign(new Error('TOP_SECRET'), { cause: { code: 'ECONNREFUSED' } });
       if (mode === 'timeout') throw new DOMException('TOP_SECRET', 'TimeoutError');
-      if (mode === 'JSON') return new Response('TOP_SECRET <html>');
+      if (mode === 'JSON') return new Response('TOP_SECRET <html>', { headers: { 'Content-Type': 'application/json' } });
       return Response.json({ data: {}, total: 1 });
     });
     await assert.rejects(client.getMovies(), (error) => {
@@ -96,7 +105,7 @@ test('multi-instance inspection isolates failures, skips disabled instances and 
   const lines = []; t.mock.method(console, 'log', (line) => lines.push(line)); t.mock.method(console, 'error', (line) => lines.push(line));
   const config = { bazarr: [{ ...instance, name: 'broken' }, { ...instance, name: '4K', enabled: false }, { ...instance, name: 'TOP_SECRET-HD', url: 'http://other:6767' }] };
   const calls = [];
-  const result = await inspectBazarr(config, { logger: createLogger('info', [instance.apiKey]), clientFactory: (item) => createBazarrClient(item, { fetchImpl: async (url, init) => {
+  const result = await inspectBazarr(config, { logger: createLogger('info', [instance.apiKey]), clientFactory: (item) => transportClient(item, { fetchImpl: async (url, init) => {
     calls.push({ url: new URL(url), init });
     assert.equal(init.method, 'GET'); assert.doesNotMatch(url.pathname, /providers|subtitles|scan|search/);
     if (item.name === 'broken') throw new Error('TOP_SECRET');
@@ -120,7 +129,7 @@ test('partial inspection failures keep other reliable counts and never invent to
 });
 test('single instance inspection uses all read-only metadata operations including filtered episodes', async () => {
   const calls = []; const logger = { info() {}, warn() {}, error() {} };
-  const result = await inspectBazarr({ bazarr: [instance] }, { logger, clientFactory: (item) => createBazarrClient(item, { fetchImpl: async (url, init) => {
+  const result = await inspectBazarr({ bazarr: [instance] }, { logger, clientFactory: (item) => transportClient(item, { fetchImpl: async (url, init) => {
     calls.push(url.pathname); assert.equal(init.method, 'GET');
     if (url.pathname.endsWith('/system/status')) return Response.json({ data: { bazarr_version: '1.5.5' } });
     if (url.pathname.endsWith('/series')) return Response.json({ data: [series(1)], total: 1 });
@@ -134,7 +143,7 @@ test('single instance inspection uses all read-only metadata operations includin
 test('each configured instance uses its own API key without cross-instance state', async () => {
   const keys = [];
   for (const apiKey of ['FIRST_SECRET', 'SECOND_SECRET']) {
-    const client = createBazarrClient({ ...instance, apiKey }, { fetchImpl: async (_url, options) => {
+    const client = transportClient({ ...instance, apiKey }, { fetchImpl: async (_url, options) => {
       keys.push(options.headers['X-API-KEY']); return Response.json({ data: [], total: 0 });
     } });
     assert.deepEqual(await client.getMovies(), []);
@@ -149,4 +158,39 @@ test('episode identifiers are batched without an unfiltered fallback', async () 
     return Response.json({ data: selected.map((id) => episode(id)) });
   });
   assert.equal((await client.getEpisodes({ episodeIds: ids })).length, 101); assert.equal(calls.length, 3);
+});
+
+for (const identity of [{ radarrMovieId: 12 }, { sonarrEpisodeId: 34 }]) {
+  test(`subtitle metadata uses Tsarr with explicit media identity: ${Object.keys(identity)[0]}`, async () => {
+    const tracks = { audio_tracks: [], embedded_subtitles_tracks: [{ stream: 's:0', language: 'eng' }], external_subtitles_tracks: [] };
+    const { client, calls } = setup((url) => {
+      assert.equal(url.pathname, '/proxy/bazarr/api/subtitles');
+      assert.equal(url.searchParams.get('subtitlesPath'), '/media/example.en.srt');
+      const [field, id] = Object.entries(identity)[0];
+      assert.equal(url.searchParams.get(field), String(id));
+      assert.equal(url.searchParams.has('action'), false);
+      return Response.json({ data: tracks });
+    });
+    assert.deepEqual(await client.getSubtitles({ subtitlesPath: '/media/example.en.srt', ...identity }), tracks);
+    assert.equal(calls.length, 1);
+    await assert.rejects(client.getSubtitles(), /INVALID_IDS/);
+    assert.equal(calls.length, 1);
+  });
+}
+
+test('HTML and malformed subtitle metadata fail rather than appearing empty', async () => {
+  await assert.rejects(setup(() => new Response('<html>secret</html>')).client.getMovies(), /INVALID_RESPONSE/);
+  await assert.rejects(setup(() => Response.json({ data: {} })).client.getSubtitles({ subtitlesPath: '/subs.srt', radarrMovieId: 1 }), /INVALID_RESPONSE/);
+});
+
+test('two simultaneous SDK objects keep authentication separate during interleaved calls', async (t) => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (request) => {
+    calls.push([new URL(request.url).host, request.headers.get('X-API-KEY')]);
+    return Response.json({ data: [], total: 0 });
+  });
+  const a = createBazarrClient({ ...instance, url: 'http://first', apiKey: 'FIRST' });
+  const b = createBazarrClient({ ...instance, url: 'http://second', apiKey: 'SECOND' });
+  await a.getMovies(); await b.getMovies(); await a.getSeries();
+  assert.deepEqual(calls, [['first', 'FIRST'], ['second', 'SECOND'], ['first', 'FIRST']]);
 });

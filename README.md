@@ -9,7 +9,7 @@ custom HTTP server or permanent production process.
 
 Phase 2 provides YAML loading, multi-instance validation, credential-safe structured
 logging and manual CLI routing. Phase 3 adds read-only Bazarr metadata inspection
-and official upstream API-contract documentation. **Translation functionality is not implemented yet.**
+through Tsarr and official upstream API-contract documentation. **Translation functionality is not implemented yet.**
 Both operation scaffolds validate configuration, identify the requested operation,
 report that it is not implemented and exit successfully. Neither connects to Bazarr
 nor creates or processes a request file. Actual configuration/command errors exit
@@ -55,7 +55,7 @@ npm run run:request       # request scaffold, loads /config/config.yml
 npm test                  # offline Node.js tests
 ```
 
-Node.js 24, ES modules and the existing `yaml` dependency are used. No CLI framework
+Node.js >=24.22.1 <25, ES modules, `yaml` and Tsarr 2.16.3 are used. No CLI framework
 or extra services are required. Production commands execute once and terminate.
 
 ## Docker development
@@ -149,7 +149,7 @@ requests:
 ```
 
 This file is temporary, externally mounted and manually editable. It is not a
-permanent database or translation history. **Batch generation, API communication,
+permanent database or translation history. **Batch generation, translation
 submission and cleanup are future work and are not performed by this phase.**
 
 ## Phase 3: read-only Bazarr API foundation
@@ -170,15 +170,33 @@ Supported methods in `src/bazarr.js`:
 | `getEpisodes({ seriesIds })` or `({ episodeIds })` | `/api/episodes` | `data` array; required `seriesid[]` or `episodeid[]` |
 | `getWantedMovies()` | `/api/movies/wanted` | `data` array and `total`; `start`/`length` |
 | `getWantedEpisodes()` | `/api/episodes/wanted` | `data` array and `total`; `start`/`length` |
+| `getSubtitles({ subtitlesPath, radarrMovieId })` or `sonarrEpisodeId` | `/api/subtitles` | Track-reference `data` object; no pagination |
 
-Each client uses the instance-specific `X-API-KEY`, a request timeout and explicit
-GETs with redirects disabled. Configure the **Bazarr base URL**, including any
-reverse-proxy prefix (for example `https://example.org/bazarr`), not the `/api`
-endpoint. Metadata keeps upstream field names, including `radarrId`,
-`sonarrSeriesId`, `sonarrEpisodeId`, titles, paths, year, monitored flags,
-`subtitles` and `missing_subtitles` when supplied. Empty collections are valid;
-failed, malformed or incomplete responses raise safe errors without response
-bodies, API keys or complete request URLs. No automatic retry loop is added.
+[Tsarr 2.16.3](https://github.com/robbeverhelst/Tsarr) provides the generated API
+bindings, authentication, JSON handling and 30-second timeout. Each enabled instance
+has its own `BazarrClient`; no custom HTTP client or Swagger downloader is maintained.
+The installed package declares Node >=24.21.0; this project requires >=24.22.1 <25
+and both Docker stages use `node:24.22.1-bookworm-slim`.
+
+Our small read-only facade handles collection pagination, metadata validation and
+safe errors. Tsarr returns `{ data, error, request, response }`, so we check the HTTP
+status and error before reading the nested Bazarr response. Keys, SDK request objects,
+response bodies and raw transport exceptions are never included in diagnostics.
+SDK retries are not enabled. Tsarr supplies the `X-API-KEY` header automatically.
+It follows redirects by default; configure the final trusted Bazarr URL directly.
+Include any reverse-proxy prefix (for example `https://example.org/bazarr`).
+
+SDK methods used: `getSystemStatus`, `getMovies`, `getSeries`, `getEpisodes`,
+`getMoviesWanted`, `getEpisodesWanted`, and the explicitly requested `getSubtitles`.
+Metadata retains upstream names: `radarrId`, `sonarrSeriesId`, `sonarrEpisodeId`,
+titles, paths, year, monitored flags, `subtitles` and `missing_subtitles` when supplied.
+Empty collections are valid; malformed, failed or incomplete responses are errors.
+`getSubtitles({ subtitlesPath, radarrMovieId })` (or `sonarrEpisodeId`) retrieves
+track references through the SDK. It requires an explicit path and media ID and is
+not called by inspection: indexed subtitle information already comes with library
+metadata. Upstream can probe media and update its metadata cache on a cache miss;
+there is no cache-only parameter. It is not a global subtitle listing or embedded
+extraction operation. Inspection uses only existing library/wanted records.
 
 Episodes are not globally paginated upstream. Explicit IDs are batched to keep
 URLs bounded; the API returns all indexed episodes matching those IDs. Inspection
@@ -191,35 +209,37 @@ Indexed subtitle metadata may contain `embedded_track_id` and a null subtitle
 `path`. Availability depends on the Bazarr version, existing index and settings.
 No ffprobe cache, disk scan, embedded extraction or eligibility decision is made.
 
-### API specification management (development only)
+### SDK and embedded translation compatibility
 
-Bazarr uses Flask-RESTX **Swagger 2.0**; Seerr's reference project uses OpenAPI 3.
-The official Bazarr repository generates Swagger dynamically at `/api/swagger.json`
-and does **not publish a static Bazarr specification**. The similarly named
-`tests/bazarr/fixtures/jellyfin-openapi.json` is for Jellyfin, not Bazarr.
+Bazarr uses Swagger 2.0; the Seerr reference project uses OpenAPI 3. Tsarr bundles
+generated Bazarr bindings, so there is no application Swagger download command or
+saved specification dependency. See [API notes](docs/README.md) for upstream sources.
 
-`npm run update:bazarr-openapi` currently reports this upstream limitation and exits
-without network access or file changes. It does not load local YAML, require API
-credentials or contact a running instance. No `docs/bazarr-swagger.json` is invented
-or checked in. See `docs/README.md` for the verified upstream source references.
-If an official static document becomes available later, the reference project's
-validated download and atomic replacement design can be reused then.
+A mock-only test verifies this **future** SDK invocation for an embedded track:
+
+```javascript
+await sdk.applySubtitleMods({ query: {
+  action: 'translate', language: 'nl', type: 'movie', id: 123,
+  subtitles_id: 456, forced: 'False', hi: 'False', original_format: 'True',
+} });
+```
+
+The generated `patchSubtitles` passes `query` through, and the serializer keeps
+`subtitles_id` as well as all other supplied parameters. `path` can be omitted in
+JavaScript for embedded translation. The bundled declarations are older: they still
+require `path` and do not declare `subtitles_id`. Mock tests prove serialization,
+not acceptance by any installed Bazarr version or successful translation. There is
+no application translation command yet; the example is not invoked at runtime.
 
 ```bash
 docker compose up -d --build
 docker compose exec requester npm run bazarr:inspect
-docker compose exec requester npm run update:bazarr-openapi
 docker compose exec requester npm test
 ```
 
-Development mounts `scripts` and `tests` read-only and `docs` read/write, alongside
-the existing source/config mounts. The production image contains neither saved
-Swagger nor development scripts/tests. Runtime communication does not depend on
-any downloaded specification. The static-spec status command also works locally:
-
-```bash
-npm run update:bazarr-openapi
-```
+Rebuild after dependency changes. Development mounts source, tests and the config
+example read-only, plus external config and `docs`. Production excludes tests and
+development documentation. No documentation is downloaded during either command.
 
 Actual Bazarr connectivity will be tested separately after configuration. Use real
 credentials only in the ignored external config, never in source or committed docs.
@@ -229,8 +249,8 @@ offline development. `generate` and `request` never connect to Bazarr in this ph
 ### No subtitle searches or translation actions
 
 Wanted endpoints only read Bazarr's existing indexed missing-language records.
-They do **not** request a provider search. The client has a fixed allowlist and
-never accesses `/api/providers/movies`, `/api/providers/episodes`, scan/refresh,
+They do **not** request a provider search. The application exposes only named
+read methods and never accesses `/api/providers/movies`, `/api/providers/episodes`, scan/refresh,
 download or translation actions. No Sonarr/Radarr API is called by this app.
 `generate` and `request` remain nonfunctional scaffolds: neither creates or processes
 `requests.yml`. The new `inspect` command is the only application operation that
