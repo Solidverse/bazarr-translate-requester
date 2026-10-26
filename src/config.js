@@ -22,23 +22,34 @@ export async function loadConfig(path = '/config/config.yml') {
     throw new Error('Invalid YAML syntax in configuration file.');
   }
   if (!object(config)) invalid('root', 'must be a YAML mapping.');
-  if (!object(config.translation)) invalid('translation', 'must be a mapping.');
-  for (const field of ['sourceLanguage', 'targetLanguage']) {
-    if (!nonEmpty(config.translation[field])) invalid(`translation.${field}`, 'must be a non-empty string.');
+  if (['bazarr', 'sonarr', 'radarr', 'translation', 'scheduleCron', 'minimumAgeHours'].some((key) => Object.hasOwn(config, key))) {
+    throw new Error('Configuration migration required: use the instances array with nested bazarr, optional sonarr/radarr and translation settings. See config.example.yml; existing files are not rewritten.');
   }
-  if (!Array.isArray(config.bazarr)) invalid('bazarr', 'must be an array.');
-  config.bazarr.forEach((instance, index) => {
-    const field = `bazarr[${index}]`;
+  if (!Array.isArray(config.instances)) invalid('instances', 'must be an array.');
+  const names = new Set();
+  config.instances.forEach((instance, index) => {
+    const field = `instances[${index}]`;
     if (!object(instance) || typeof instance.enabled !== 'boolean') invalid(field, 'must be a mapping with a boolean enabled value.');
-    if (!instance.enabled) return;
     if (!nonEmpty(instance.name)) invalid(`${field}.name`, 'must be a non-empty string.');
-    if (!nonEmpty(instance.apiKey)) invalid(`${field}.apiKey`, 'must be a non-empty string.');
-    try {
-      if (!nonEmpty(instance.url)) throw new Error();
-      const url = new URL(instance.url);
-      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error();
-    } catch {
-      invalid(`${field}.url`, 'must be an HTTP/HTTPS URL without embedded credentials.');
+    if (names.has(instance.name.trim())) invalid(`${field}.name`, 'must be unique.');
+    names.add(instance.name.trim());
+    if (!instance.enabled) return;
+    for (const service of ['bazarr', 'sonarr', 'radarr']) {
+      if (service !== 'bazarr' && !Object.hasOwn(instance, service)) continue;
+      const connection = instance[service];
+      if (!object(connection)) invalid(`${field}.${service}`, 'must be a connection mapping.');
+      if (!nonEmpty(connection.apiKey)) invalid(`${field}.${service}.apiKey`, 'must be a non-empty string.');
+      try {
+        if (!nonEmpty(connection.url)) throw new Error();
+        const url = new URL(connection.url);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
+      } catch {
+        invalid(`${field}.${service}.url`, 'must be an HTTP/HTTPS URL without embedded credentials, query or fragment.');
+      }
+    }
+    if (!object(instance.translation)) invalid(`${field}.translation`, 'must be a mapping.');
+    for (const language of ['sourceLanguage', 'targetLanguage']) {
+      if (!nonEmpty(instance.translation[language])) invalid(`${field}.translation.${language}`, 'must be a non-empty string.');
     }
   });
   if (!object(config.logging) || !['debug', 'info', 'warn', 'error'].includes(config.logging.level)) {

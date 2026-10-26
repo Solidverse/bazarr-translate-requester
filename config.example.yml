@@ -1,17 +1,59 @@
-translation:
-  sourceLanguage: en
-  targetLanguage: nl
+# ==========================================
+# Media Instances
+# ==========================================
 
-bazarr:
+instances:
+
+  # ----------------------------------------
+  # HD Instance
+  # ----------------------------------------
+
   - name: HD
     enabled: true
-    url: http://bazarr-hd:6767
-    apiKey: YOUR_HD_API_KEY
+
+    bazarr:
+      url: http://bazarr-hd:6767
+      apiKey: YOUR_BAZARR_HD_API_KEY
+
+    # Optional: remove either section when not used.
+    sonarr:
+      url: http://sonarr-hd:8989
+      apiKey: YOUR_SONARR_HD_API_KEY
+
+    radarr:
+      url: http://radarr-hd:7878
+      apiKey: YOUR_RADARR_HD_API_KEY
+
+    translation:
+      sourceLanguage: en
+      targetLanguage: nl
+
+  # ----------------------------------------
+  # 4K Instance
+  # ----------------------------------------
 
   - name: 4K
     enabled: false
-    url: http://bazarr-4k:6767
-    apiKey: YOUR_4K_API_KEY
+
+    bazarr:
+      url: http://bazarr-4k:6767
+      apiKey: YOUR_BAZARR_4K_API_KEY
+
+    sonarr:
+      url: http://sonarr-4k:8989
+      apiKey: YOUR_SONARR_4K_API_KEY
+
+    radarr:
+      url: http://radarr-4k:7878
+      apiKey: YOUR_RADARR_4K_API_KEY
+
+    translation:
+      sourceLanguage: en
+      targetLanguage: nl
+
+# ==========================================
+# Global Settings
+# ==========================================
 
 logging:
   level: info

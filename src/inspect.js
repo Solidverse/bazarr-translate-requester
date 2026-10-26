@@ -3,12 +3,12 @@ import { createBazarrClient, describeBazarrError } from './bazarr.js';
 export async function inspectBazarr(config, { logger, clientFactory = createBazarrClient } = {}) {
   let failed = false;
   const summaries = [];
-  for (const instance of config.bazarr) {
+  for (const instance of config.instances) {
     if (!instance.enabled) { logger.info(`[${instance.name ?? 'Bazarr'}] Disabled. Skipping.`); continue; }
     const summary = { instance: instance.name };
     try {
       logger.info(`[${instance.name}] Connecting...`);
-      const client = clientFactory(instance);
+      const client = clientFactory({ ...instance.bazarr, name: instance.name });
       await client.getStatus();
       logger.info(`[${instance.name}] Connected successfully.`);
       async function collection(label, operation) {

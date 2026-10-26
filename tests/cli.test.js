@@ -36,7 +36,7 @@ for (const operation of ['generate', 'request']) {
     assert.equal(network.mock.callCount(), 0);
     assert.match(lines.join('\n'), /not implemented yet/);
     assert.match(lines.join('\n'), new RegExp(`Operation: ${operation}`));
-    assert.doesNotMatch(lines.join('\n'), /YOUR_HD_API_KEY|YOUR_4K_API_KEY/);
+    assert.doesNotMatch(lines.join('\n'), /YOUR_BAZARR_HD_API_KEY|YOUR_SONARR_HD_API_KEY|YOUR_RADARR_HD_API_KEY|YOUR_BAZARR_4K_API_KEY/);
   });
   test(`${operation} exits nonzero for missing or invalid configuration`, async (t) => {
     const { path } = await fixture(t); const lines = capture(t);
@@ -72,8 +72,30 @@ test('actual CLI exit codes and npm routing', () => {
 test('inspect routes to the read-only operation with validated multi-instance config', async (t) => {
   const { path } = await fixture(t); capture(t); let calls = 0;
   assert.equal(await main(['inspect'], { configPath: path, inspect: async (config) => {
-    calls++; assert.equal(config.bazarr.length, 2); return { failed: false };
+    calls++; assert.equal(config.instances.length, 2); return { failed: false };
   } }), 0);
   assert.equal(calls, 1);
   assert.equal(await main(['inspect'], { configPath: path, inspect: async () => ({ failed: true }) }), 1);
+});
+
+test('services command routes with nested config and reflects inspection failures', async (t) => {
+  const { path } = await fixture(t); capture(t);
+  const network = t.mock.method(globalThis, 'fetch', () => assert.fail('Routing must not make requests'));
+  let calls = 0;
+  assert.equal(await main(['services'], { configPath: path, servicesInspect: async (config) => {
+    calls++; assert.equal(config.instances[0].sonarr.apiKey, 'YOUR_SONARR_HD_API_KEY'); return { failed: false };
+  } }), 0);
+  assert.equal(calls, 1);
+  assert.equal(await main(['services'], { configPath: path, servicesInspect: async () => ({ failed: true }) }), 1);
+  assert.equal(network.mock.callCount(), 0);
+});
+
+test('all nested service keys are redacted from CLI diagnostics', async (t) => {
+  const { path } = await fixture(t); const lines = capture(t);
+  const { parse, stringify } = await import('yaml');
+  const config = parse(await readFile(path, 'utf8'));
+  config.instances[0].name = 'YOUR_SONARR_HD_API_KEY-YOUR_RADARR_HD_API_KEY-YOUR_BAZARR_HD_API_KEY';
+  await writeFile(path, stringify(config));
+  assert.equal(await main(['generate'], { configPath: path }), 0);
+  assert.doesNotMatch(lines.join(), /YOUR_.*API_KEY/);
 });

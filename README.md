@@ -8,8 +8,8 @@ custom HTTP server or permanent production process.
 ## Current status
 
 Phase 2 provides YAML loading, multi-instance validation, credential-safe structured
-logging and manual CLI routing. Phase 3 adds read-only Bazarr metadata inspection
-through Tsarr and official upstream API-contract documentation. **Translation functionality is not implemented yet.**
+logging and manual CLI routing. Phase 4A groups each Bazarr environment with
+optional Sonarr/Radarr connections and its own translation settings. Read-only inspection uses Tsarr. **Translation functionality is not implemented yet.**
 Both operation scaffolds validate configuration, identify the requested operation,
 report that it is not implemented and exit successfully. Neither connects to Bazarr
 nor creates or processes a request file. Actual configuration/command errors exit
@@ -23,27 +23,57 @@ The application reads `/config/config.yml` afresh for each operation. API keys a
 never included in normal logs or validation errors; do not commit local config.
 
 ```yaml
-translation:
-  sourceLanguage: en
-  targetLanguage: nl
-bazarr:
-  - name: HD
+instances:
+  - name: Main
     enabled: true
-    url: http://bazarr-hd:6767
-    apiKey: YOUR_HD_API_KEY
-  - name: 4K
-    enabled: false
-    url: http://bazarr-4k:6767
-    apiKey: YOUR_4K_API_KEY
+    bazarr:
+      url: http://bazarr:6767
+      apiKey: YOUR_BAZARR_API_KEY
+    # Optional; omit either complete section when unused.
+    sonarr:
+      url: http://sonarr:8989
+      apiKey: YOUR_SONARR_API_KEY
+    radarr:
+      url: http://radarr:7878
+      apiKey: YOUR_RADARR_API_KEY
+    translation:
+      sourceLanguage: en
+      targetLanguage: nl
 logging:
   level: info
 dryRun: true
 ```
 
-Each Bazarr instance has independent connection settings. Disabled instances are
-not used. Keep distinct names to identify future batch entries. Logging supports
-`debug`, `info`, `warn`, `error` and writes JSON lines to stdout/stderr with API-key
-redaction. Configurable log levels apply to scaffold diagnostics too.
+See `config.example.yml` for the complete HD/4K example. Bazarr and translation
+settings are required for enabled instances. Sonarr and Radarr are optional: remove
+those sections for Bazarr-only operation. A present service section must contain a
+valid HTTP/HTTPS URL and nonempty API key; URLs cannot contain embedded credentials,
+query strings or fragments. Reverse-proxy base paths are supported.
+
+Names must be nonempty and unique (including disabled instances); `enabled` must be
+boolean. Disabled instances do not need connection credentials or translation
+settings and initialize no clients. Global settings remain `logging` and `dryRun`.
+Every environment keeps its own credentials and media IDs; no services are matched
+by name or searched across environments for matching numeric IDs.
+
+Logging supports `debug`, `info`, `warn`, `error` and writes JSON lines to stdout/stderr.
+API keys from all nested services are redacted, including keys in instance names.
+
+### Manual configuration migration
+
+The old top-level `bazarr` array and global `translation` block are no longer accepted.
+The loader reports a migration error; it never rewrites configuration files.
+
+1. Back up your external `/config/config.yml` (or `dev-config/config.yml`).
+2. Create `instances`; move each old Bazarr entry's `url`/`apiKey` into its nested
+   `bazarr` block. Keep that entry's `name` and `enabled` on the parent instance.
+3. Copy the old translation settings into each instance's `translation` block.
+4. Add Sonarr/Radarr only under their associated parent, or omit them entirely.
+5. Remove obsolete root-level service/translation/scheduling fields; retain global
+   `logging` and `dryRun`. Compare with `config.example.yml` and run an inspection.
+
+Your existing development config is intentionally left untouched and needs this
+manual migration before running commands that load it.
 
 ## Commands
 
@@ -52,6 +82,8 @@ npm start                 # usage, no configuration required
 node src/index.js help    # usage
 npm run run:generate      # generate scaffold, loads /config/config.yml
 npm run run:request       # request scaffold, loads /config/config.yml
+npm run bazarr:inspect   # indexed Bazarr library and wanted metadata
+npm run services:inspect # status/version of all configured services
 npm test                  # offline Node.js tests
 ```
 
@@ -152,7 +184,21 @@ This file is temporary, externally mounted and manually editable. It is not a
 permanent database or translation history. **Batch generation, translation
 submission and cleanup are future work and are not performed by this phase.**
 
-## Phase 3: read-only Bazarr API foundation
+## Read-only service inspection
+
+`npm run services:inspect` checks each enabled instance’s Bazarr, plus Sonarr and
+Radarr when configured. It uses SDK `getSystemStatus()` for the optional services
+(GET `/api/v3/system/status`) and the existing Bazarr status facade
+(GET `/api/system/status`). Bazarr returns a nested data envelope; Sonarr and Radarr
+return their status object directly inside the SDK result. Versions are shown when
+available. Failures are isolated per service and instance; any failure gives exit
+code 1. Missing optional services are neither initialized nor treated as errors.
+
+```bash
+docker compose exec requester npm run services:inspect
+```
+
+## Read-only Bazarr library inspection
 
 `npm run bazarr:inspect` loads the same configuration and queries enabled instances
 independently. Failures are reported per instance/collection; unavailable counts
@@ -251,7 +297,17 @@ offline development. `generate` and `request` never connect to Bazarr in this ph
 Wanted endpoints only read Bazarr's existing indexed missing-language records.
 They do **not** request a provider search. The application exposes only named
 read methods and never accesses `/api/providers/movies`, `/api/providers/episodes`, scan/refresh,
-download or translation actions. No Sonarr/Radarr API is called by this app.
+download or translation actions. Sonarr/Radarr access is limited to system status
+through `services:inspect`; Bazarr library inspection never initializes those clients.
 `generate` and `request` remain nonfunctional scaffolds: neither creates or processes
-`requests.yml`. The new `inspect` command is the only application operation that
-reads Bazarr during this phase. It remains short-lived and database-free.
+`requests.yml`. Only the two inspection commands read service APIs during this
+phase. The application remains short-lived and database-free.
+
+## Future media age filtering
+
+A future generator may read Radarr movie-file or Sonarr episode-file import dates,
+using only the service nested under the same instance as the Bazarr media. Identical
+numeric IDs in different environments must never be matched across instances.
+No file associations, dates, `--min-age`, selection arguments, eligibility logic,
+request generation or translation submission are implemented in Phase 4A.
+Connectivity tests with mocked transports do not prove live instance compatibility.

@@ -18,7 +18,7 @@ async function fixture(t, source = example) {
 
 test('valid example loads and each execution reads the file again', async (t) => {
   const path = await fixture(t);
-  assert.equal((await loadConfig(path)).bazarr.length, 2);
+  assert.equal((await loadConfig(path)).instances.length, 2);
   await writeFile(path, example.replace('dryRun: true', 'dryRun: false'));
   assert.equal((await loadConfig(path)).dryRun, false);
 });
@@ -35,39 +35,66 @@ test('invalid YAML never echoes credentials', async (t) => {
   await assert.rejects(loadConfig(path), (error) => error.message === 'Invalid YAML syntax in configuration file.');
 });
 
-test('enabled instances require name, URL and key; disabled instances may omit them', async (t) => {
+test('disabled instances require a name and enabled flag but no connections or translation', async (t) => {
   const path = await fixture(t);
   const config = await loadConfig(path);
-  config.bazarr = [{ enabled: false }];
+  config.instances = [{ name: 'Offline', enabled: false, bazarr: { url: 'invalid' } }];
   await writeFile(path, stringify(config));
-  assert.equal((await loadConfig(path)).bazarr[0].enabled, false);
-  config.bazarr[0].enabled = true;
+  assert.equal((await loadConfig(path)).instances[0].enabled, false);
+  config.instances[0].enabled = true;
   await writeFile(path, stringify(config));
-  await assert.rejects(loadConfig(path), /bazarr\[0\].name/);
-  config.bazarr = [];
-  await writeFile(path, stringify(config));
-  assert.deepEqual((await loadConfig(path)).bazarr, []);
+  await assert.rejects(loadConfig(path), /instances\[0\].bazarr.apiKey/);
 });
+
+for (const services of [[], ['sonarr'], ['radarr'], ['sonarr', 'radarr']]) {
+  test(`single Bazarr instance with optional services: ${services.join(',') || 'none'}`, async (t) => {
+    const path = await fixture(t);
+    const config = await loadConfig(path);
+    const instance = config.instances[0];
+    for (const service of ['sonarr', 'radarr']) if (!services.includes(service)) delete instance[service];
+    config.instances = [instance];
+    await writeFile(path, stringify(config));
+    assert.deepEqual(await loadConfig(path), config);
+  });
+}
 
 test('invalid types and values fail with field-specific, secret-free diagnostics', async (t) => {
   const path = await fixture(t);
   const base = await loadConfig(path);
+  const changed = (change) => { const config = structuredClone(base); change(config); return config; };
   const cases = [
     [null, 'root'],
-    [{ ...base, translation: null }, 'translation'],
-    [{ ...base, translation: { ...base.translation, sourceLanguage: '' } }, 'sourceLanguage'],
-    [{ ...base, logging: { level: 'TOP_SECRET' } }, 'logging.level'],
-    [{ ...base, dryRun: 'true' }, 'dryRun'],
-    [{ ...base, bazarr: {} }, 'bazarr'],
-    [{ ...base, bazarr: [{ enabled: 'true' }] }, 'bazarr'],
-    [{ ...base, bazarr: [{ ...base.bazarr[0], apiKey: '' }] }, 'apiKey'],
-    [{ ...base, bazarr: [{ ...base.bazarr[0], url: 'ftp://TOP_SECRET' }] }, 'url'],
-    [{ ...base, bazarr: [{ ...base.bazarr[0], url: ['http://example.org'] }] }, 'url'],
-    [{ ...base, bazarr: [{ ...base.bazarr[0], url: 'https://user:TOP_SECRET@example.org' }] }, 'url'],
+    [changed((c) => { c.instances = {}; }), 'instances'],
+    [changed((c) => { c.instances[0] = null; }), 'instances[0]'],
+    [changed((c) => { c.instances[0].name = ''; }), 'name'],
+    [changed((c) => { c.instances[0].enabled = 'true'; }), 'enabled'],
+    [changed((c) => { c.instances[1].name = c.instances[0].name; }), 'unique'],
+    [changed((c) => { c.instances[0].translation = null; }), 'translation'],
+    ...['sourceLanguage', 'targetLanguage'].map((key) => [changed((c) => { c.instances[0].translation[key] = ''; }), key]),
+    [changed((c) => { delete c.instances[0].bazarr; }), 'bazarr'],
+    [changed((c) => { c.logging = { level: 'TOP_SECRET' }; }), 'logging.level'],
+    [changed((c) => { c.dryRun = 'true'; }), 'dryRun'],
   ];
+  for (const service of ['bazarr', 'sonarr', 'radarr']) {
+    cases.push([changed((c) => { c.instances[0][service] = null; }), service]);
+    cases.push([changed((c) => { c.instances[0][service].apiKey = ''; }), 'apiKey']);
+    for (const url of ['ftp://TOP_SECRET', ['http://example.org'], 'https://user:TOP_SECRET@example.org', 'http://example.org/?apikey=TOP_SECRET']) {
+      cases.push([changed((c) => { c.instances[0][service].url = url; }), 'url']);
+    }
+  }
   for (const [config, field] of cases) {
     await writeFile(path, stringify(config));
     await assert.rejects(loadConfig(path), (error) => error.message.includes(field) && !error.message.includes('TOP_SECRET'));
+  }
+});
+
+test('old root settings produce a migration error without rewriting the configuration', async (t) => {
+  const path = await fixture(t);
+  for (const key of ['bazarr', 'sonarr', 'radarr', 'translation', 'scheduleCron', 'minimumAgeHours']) {
+    const source = stringify({ [key]: 'TOP_SECRET' });
+    await writeFile(path, source);
+    await assert.rejects(loadConfig(path), (error) => /migration required.*instances/.test(error.message) && !error.message.includes('TOP_SECRET'));
+    assert.equal(await readFile(path, 'utf8'), source);
   }
 });
 
@@ -81,3 +108,15 @@ test('logging filters levels and redacts API keys even in instance names', (t) =
   assert.equal(lines[0].message, 'Instance [REDACTED]');
 });
 
+
+test('each environment preserves its own translation and connection settings', async (t) => {
+  const path = await fixture(t);
+  const config = await loadConfig(path);
+  config.instances[1].enabled = true;
+  config.instances[1].translation.targetLanguage = 'de';
+  await writeFile(path, stringify(config));
+  const loaded = await loadConfig(path);
+  assert.equal(loaded.instances[0].translation.targetLanguage, 'nl');
+  assert.equal(loaded.instances[1].translation.targetLanguage, 'de');
+  assert.notEqual(loaded.instances[0].bazarr.url, loaded.instances[1].bazarr.url);
+});

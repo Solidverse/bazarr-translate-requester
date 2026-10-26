@@ -13,7 +13,8 @@
     "test": "node --test",
     "run:generate": "node src/index.js generate",
     "run:request": "node src/index.js request",
-    "bazarr:inspect": "node src/index.js inspect"
+    "bazarr:inspect": "node src/index.js inspect",
+    "services:inspect": "node src/index.js services"
   },
   "dependencies": {
     "tsarr": "2.16.3",

@@ -13,6 +13,7 @@ function transportClient(instance, { fetchImpl, ...options }) {
   return createBazarrClient(instance, options);
 }
 const instance = { name: 'HD', enabled: true, url: 'http://bazarr:6767/proxy/bazarr/', apiKey: 'TOP_SECRET' };
+const environment = (connection) => ({ name: connection.name, enabled: connection.enabled, bazarr: { url: connection.url, apiKey: connection.apiKey }, translation: { sourceLanguage: 'en', targetLanguage: 'nl' } });
 const movie = (id) => ({ radarrId: id, title: 'Movie', year: '2025', path: '/movies/test.mkv', monitored: true, subtitles: [{ code2: 'en', path: null, embedded_track_id: 2 }], missing_subtitles: [{ code2: 'nl' }] });
 const series = (id) => ({ sonarrSeriesId: id, title: 'Series' });
 const episode = (id, sid = 1) => ({ sonarrEpisodeId: id, sonarrSeriesId: sid, title: 'Episode', season: 1, episode: 2, path: '/series/test.mkv' });
@@ -103,7 +104,7 @@ test('native timeout aborts a stalled fetch', async () => {
 });
 test('multi-instance inspection isolates failures, skips disabled instances and never searches providers', async (t) => {
   const lines = []; t.mock.method(console, 'log', (line) => lines.push(line)); t.mock.method(console, 'error', (line) => lines.push(line));
-  const config = { bazarr: [{ ...instance, name: 'broken' }, { ...instance, name: '4K', enabled: false }, { ...instance, name: 'TOP_SECRET-HD', url: 'http://other:6767' }] };
+  const config = { instances: [{ ...instance, name: 'broken' }, { ...instance, name: '4K', enabled: false }, { ...instance, name: 'TOP_SECRET-HD', url: 'http://other:6767' }].map(environment) };
   const calls = [];
   const result = await inspectBazarr(config, { logger: createLogger('info', [instance.apiKey]), clientFactory: (item) => transportClient(item, { fetchImpl: async (url, init) => {
     calls.push({ url: new URL(url), init });
@@ -120,7 +121,7 @@ test('multi-instance inspection isolates failures, skips disabled instances and 
 
 test('partial inspection failures keep other reliable counts and never invent totals', async () => {
   const lines = []; const logger = Object.fromEntries(['info', 'warn', 'error'].map((level) => [level, (line) => lines.push(line)]));
-  const result = await inspectBazarr({ bazarr: [instance] }, { logger, clientFactory: () => ({
+  const result = await inspectBazarr({ instances: [environment(instance)] }, { logger, clientFactory: () => ({
     getStatus: async () => ({}), getMovies: async () => [movie(1)], getSeries: async () => { throw new Error('TOP_SECRET'); },
     getEpisodes: async () => assert.fail('Unfiltered episode calls forbidden'), getWantedMovies: async () => [], getWantedEpisodes: async () => [],
   }) });
@@ -129,7 +130,7 @@ test('partial inspection failures keep other reliable counts and never invent to
 });
 test('single instance inspection uses all read-only metadata operations including filtered episodes', async () => {
   const calls = []; const logger = { info() {}, warn() {}, error() {} };
-  const result = await inspectBazarr({ bazarr: [instance] }, { logger, clientFactory: (item) => transportClient(item, { fetchImpl: async (url, init) => {
+  const result = await inspectBazarr({ instances: [environment(instance)] }, { logger, clientFactory: (item) => transportClient(item, { fetchImpl: async (url, init) => {
     calls.push(url.pathname); assert.equal(init.method, 'GET');
     if (url.pathname.endsWith('/system/status')) return Response.json({ data: { bazarr_version: '1.5.5' } });
     if (url.pathname.endsWith('/series')) return Response.json({ data: [series(1)], total: 1 });
