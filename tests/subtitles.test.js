@@ -52,6 +52,24 @@ test('forced source and external sources in embedded-only mode are excluded', ()
   assert.equal(evaluate([raw()], { ...translation, onlyEmbedded: true }).reason, 'noSource');
   assert.equal(evaluate([raw({ hi: true })]).reason, 'candidate');
 });
+test('excludeHI ignores only HI and forced targets and excludes HI sources', () => {
+  const excluding = { ...translation, onlyEmbedded: true, excludeHI: true };
+  const target = (flags) => raw({ code2: 'nl', code3: undefined, ...flags });
+  assert.equal(evaluate([raw({ path: null, embedded_track_id: 1 }), target({ hi: false, forced: false })], excluding).reason, 'target');
+  for (const existing of [target({ hi: true, forced: false }), target({ hi: false, forced: true }),
+    target({ hi: true, forced: false }), target({ hi: false, forced: false })]) {
+    const result = evaluate([raw({ path: null, embedded_track_id: 1 }), existing], excluding);
+    assert.equal(result.reason, existing.hi === false && existing.forced === false ? 'target' : 'candidate');
+  }
+  assert.equal(evaluate([raw({ hi: true, path: null, embedded_track_id: 1 })], excluding).reason, 'noSource');
+  assert.equal(evaluate([raw({ hi: true }), raw({ id: 12, hi: false, path: null, embedded_track_id: 2 })], excluding).selectedSubtitleId, 12);
+  assert.equal(evaluate([raw({ hi: undefined, path: null, embedded_track_id: 1 })], excluding).reason, 'unsupported');
+});
+test('excludeHI keeps incomplete target flags uncertain, while default still blocks on any target', () => {
+  const incomplete = raw({ code2: 'nl', code3: undefined, hi: undefined, forced: false });
+  assert.equal(evaluate([incomplete], { ...translation, excludeHI: true }).reason, 'uncertain');
+  assert.equal(evaluate([incomplete], translation).reason, 'target');
+});
 test('embedded stream ID is never substituted for missing or invalid DB IDs', () => {
   for (const id of [undefined, null, 0, -1, {}, 'invalid']) {
     assert.equal(evaluate([raw({ id, path: null, embedded_track_id: 5 })]).reason, 'unsupported');

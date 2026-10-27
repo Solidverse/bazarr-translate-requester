@@ -99,6 +99,22 @@ for(const [kind,mutate,reason] of [
   assert.equal(await readFile(f.path,'utf8'),before);assert.match(f.lines.join(),new RegExp(reason));
 });
 
+test('excludeHI revalidation rejects an old HI selection and skips completed normal targets', async t => {
+  const oldHI = entry(1, { selectedSubtitleId: 22 });
+  const f = await fixture(t, [oldHI]);
+  f.config.instances[0].translation.excludeHI = true;
+  let result = await f.run();
+  assert.equal(result.skipped, 1); assert.equal(f.submitted.length, 0);
+  assert.match(f.lines.join(), /manually selected subtitle/);
+
+  const completed = await fixture(t, [entry(2)]);
+  completed.config.instances[0].translation.excludeHI = true;
+  completed.data.get('HD:2').subtitles.push({ id: 99, code2: 'nl', hi: false, forced: false, path: '/target.srt', embedded_track_id: null });
+  result = await completed.run();
+  assert.equal(result.skipped, 1); assert.equal(completed.submitted.length, 0);
+  assert.match(completed.lines.join(), /target-language subtitle already exists/);
+});
+
 test('external track source/path and onlyEmbedded are revalidated from fresh metadata',async t=>{
   const external=track(33,{source:'external',language:'fr',path:'/source.fr.srt',embedded_track_id:undefined});
   const instance=environment('French','fr','en');instance.translation.onlyEmbedded=false;

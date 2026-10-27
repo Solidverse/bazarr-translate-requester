@@ -54,6 +54,8 @@ export async function loadConfig(path = '/config/config.yml') {
     }
     if (instance.translation.onlyEmbedded === undefined) instance.translation.onlyEmbedded = true;
     if (typeof instance.translation.onlyEmbedded !== 'boolean') invalid(`${field}.translation.onlyEmbedded`, 'must be a boolean.');
+    if (instance.translation.excludeHI === undefined) instance.translation.excludeHI = false;
+    if (typeof instance.translation.excludeHI !== 'boolean') invalid(`${field}.translation.excludeHI`, 'must be a boolean.');
   });
   if (!object(config.logging) || !['debug', 'info', 'warn', 'error'].includes(config.logging.level)) {
     invalid('logging.level', 'must be debug, info, warn, or error.');

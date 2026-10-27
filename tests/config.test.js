@@ -131,6 +131,22 @@ test('onlyEmbedded defaults to true, accepts booleans and rejects other values',
     else await assert.rejects(loadConfig(path), /onlyEmbedded/);
   }
 });
+test('excludeHI defaults to false independently per instance and accepts only booleans', async (t) => {
+  const path = await fixture(t); const config = await loadConfig(path);
+  assert.equal(config.instances[0].translation.excludeHI, false);
+  config.instances[1].enabled = true;
+  config.instances[0].translation.excludeHI = true;
+  config.instances[1].translation.excludeHI = false;
+  await writeFile(path, stringify(config));
+  const loaded = await loadConfig(path);
+  assert.equal(loaded.instances[0].translation.excludeHI, true);
+  assert.equal(loaded.instances[1].translation.excludeHI, false);
+  for (const value of ['true', null, 1]) {
+    config.instances[0].translation.excludeHI = value;
+    await writeFile(path, stringify(config));
+    await assert.rejects(loadConfig(path), /excludeHI/);
+  }
+});
 test('language identifiers must be two or three letters and are never silently defaulted', async (t) => {
   const path = await fixture(t); const config = await loadConfig(path);
   for (const value of [undefined, '', 'English', 'pt-BR', 12]) {

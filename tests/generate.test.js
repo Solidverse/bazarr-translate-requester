@@ -230,6 +230,23 @@ test('complete library metadata works outside the desired target profile, includ
   assert.equal(parse(await readFile(fixture.path, 'utf8')).requests[0].tracks[0].embedded_track_id, 7);
 });
 
+test('excludeHI generation ignores HI targets and selects normal embedded sources only', async t => {
+  const instance = environment(); instance.translation.onlyEmbedded = true; instance.translation.excludeHI = true;
+  const normal = { id: 201, code2: 'en', forced: false, hi: false, path: null, embedded_track_id: 1 };
+  const hi = { ...normal, id: 202, hi: true, embedded_track_id: 2 };
+  const movies = [
+    item(1, 'en', 'nl', { subtitles: [normal, { id: 301, code2: 'nl', forced: false, hi: true }] }),
+    item(2, 'en', 'nl', { subtitles: [normal, hi, { id: 302, code2: 'nl', forced: true, hi: false }] }),
+    item(3, 'en', 'nl', { subtitles: [hi, { id: 303, code2: 'nl', forced: false, hi: true }] }),
+  ];
+  const fixture = await setup(t, [instance], { Main: { movies, series: [] } });
+  const result = await fixture.run({ type: 'movie' });
+  assert.deepEqual(result.requests.map(r => [r.mediaId, r.selectedSubtitleId]), [[1, 201], [2, 201]]);
+  assert.equal(result.summaries[0].target, 0);
+  assert.equal(result.summaries[0].noSource, 1);
+  assert.ok(result.requests.every(r => r.tracks.every(track => track.hi === false)));
+});
+
 test('filtered or unknown completeness never uses missing_subtitles as authorization to generate', async (t) => {
   const fixture = await setup(t, [environment()], { Main: { complete: false } });
   await assert.rejects(fixture.run(), /Subtitle visibility response is incomplete/);

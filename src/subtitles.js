@@ -74,8 +74,13 @@ export function evaluateSubtitles(media, translation, resolve, { languagesVisibl
   if (!source || !target || source === target) throw new Error('Unsupported or identical translation languages for this Bazarr instance.');
   if (!Array.isArray(media.subtitles)) return { reason: 'uncertain' };
   const languages = media.subtitles.map((track) => subtitleLanguage(track, resolve));
-  // Target presence wins regardless of forced/HI, location or subtitle format.
-  if (languages.includes(target)) return { reason: 'target' };
+  // With HI exclusion enabled, only a fully classified normal target satisfies
+  // the requirement. Ambiguous target flags cannot safely establish absence.
+  if (translation.excludeHI === true) {
+    const targets = media.subtitles.filter((_, index) => languages[index] === target);
+    if (targets.some((track) => track.hi === false && track.forced === false)) return { reason: 'target' };
+    if (targets.some((track) => typeof track.hi !== 'boolean' || typeof track.forced !== 'boolean')) return { reason: 'uncertain' };
+  } else if (languages.includes(target)) return { reason: 'target' };
   if (languages.some((code) => !code)) return { reason: 'uncertain' };
   // The caller must establish source/target visibility for this media item.
   // A profile-based missing_subtitles entry alone does not establish visibility.
@@ -87,6 +92,7 @@ export function evaluateSubtitles(media, translation, resolve, { languagesVisibl
     if (languages[index] !== source) continue;
     const raw = media.subtitles[index];
     if (raw.forced === true) continue;
+    if (translation.excludeHI === true && raw.hi === true) continue;
     // Some versions/extensions may supply codec metadata. Unknown is allowed;
     // explicit bitmap information always excludes a source, even with a text path.
     const codecs = [raw.codec, raw.format].filter((value) => typeof value === 'string')

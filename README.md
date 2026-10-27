@@ -192,18 +192,26 @@ with help, never with generation; invoke commands explicitly inside the containe
 
 ### Languages, eligibility and source priority
 
-Each instance uses its own `sourceLanguage`, `targetLanguage` and `onlyEmbedded`
-(default `true`, must be boolean). The example language pair is only an example.
+Each instance uses its own `sourceLanguage`, `targetLanguage`, `onlyEmbedded`
+(default `true`) and `excludeHI` (default `false`); both settings must be boolean.
+`excludeHI: true` ignores HI target subtitles when checking whether translation
+is complete and never uses an HI source. It does not remove existing HI files.
+Translations are requested as non-HI, and a normal target reported by Bazarr on a
+later run prevents another request. Under normal successful operation this avoids
+the HI-related retranslation cycle. The example language pair is only an example.
 Two- and three-letter codes are resolved using that instance's read-only Bazarr
 language catalog, with ICU ISO aliases. Unsupported codes and identical resolved
 source/target languages fail. Bazarr's custom regional identifiers remain distinct;
 region/script tags are rejected rather than silently reduced to a base language.
 Human language names and filenames are never used to infer language.
 
-**Any indexed target-language subtitle blocks generation**, including forced, HI,
-embedded, external and image-based targets. Unknown language metadata is not treated
-as absence. Only existing source-language tracks are considered. Forced source
-tracks, missing/ambiguous database IDs and unsupported formats are excluded.
+By default, any indexed target-language subtitle blocks generation, including forced,
+HI, embedded, external and image-based targets. With `excludeHI: true`, only a normal,
+non-forced, non-HI target blocks generation; HI and forced targets remain untouched
+and do not block a suitable translation. Unknown target flags remain uncertain.
+Unknown language metadata is not treated as absence. Only existing source-language
+tracks are considered. Forced source tracks, missing/ambiguous database IDs and
+unsupported formats are excluded. With `excludeHI: true`, HI sources are also excluded.
 
 The deterministic priority policy is embedded normal, embedded HI, external normal,
 external HI. Embedded-only mode excludes every external source, but never affects
@@ -387,7 +395,9 @@ The selected database ID must still belong to that media and remain eligible. It
 source kind, language, forced/HI flags and path/stream association are checked against
 the reviewed track. A changed/missing selection is retained, **never substituted by
 the automatic default**. Existing target subtitles, including forced/HI, block
-submission. Unknown visibility and mismatched current language settings also retain
+submission by default. With `excludeHI: true`, only a normal target blocks submission,
+and HI sources in old batches fail current metadata revalidation. Unknown visibility
+and mismatched current language settings also retain
 the entry. External sources use the freshly verified exact path; embedded sources
 use database `subtitles_id`, never `embedded_track_id`. HI is preserved, forced
 sources are not submitted, and the target is normalized to Bazarr's language code.

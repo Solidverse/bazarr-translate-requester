@@ -28,6 +28,7 @@ instances:
       sourceLanguage: en
       targetLanguage: nl
       onlyEmbedded: true
+      excludeHI: false
 
   # ----------------------------------------
   # 4K Instance
@@ -52,6 +53,7 @@ instances:
       sourceLanguage: en
       targetLanguage: nl
       onlyEmbedded: true
+      excludeHI: false
 
 # ==========================================
 # Global Settings
