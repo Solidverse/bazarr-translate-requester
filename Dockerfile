@@ -17,6 +17,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/*
 ENV PUID=99 PGID=100
+ENV PATH="/usr/local/lib/requester/bin:${PATH}"
+COPY --chmod=755 docker/npm.sh /usr/local/lib/requester/bin/npm
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["node", "src/index.js"]
+CMD ["sleep", "infinity"]

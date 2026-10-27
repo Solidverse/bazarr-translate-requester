@@ -113,27 +113,30 @@ docker compose exec requester npm run run:request
 
 Image: `ghcr.io/solidverse/bazarr-translate-requester:latest`.
 Mount `/mnt/user/appdata/bazarr-translate-requester` to `/config`.
-No production Compose project or persistent container is required:
+Start a persistent idle container (or use these settings in the Unraid template):
 
 ```bash
-docker run --rm \
+docker run -d --name bazarr-translate-requester \
   -v /mnt/user/appdata/bazarr-translate-requester:/config \
-  ghcr.io/solidverse/bazarr-translate-requester:latest \
-  npm run run:generate
+  ghcr.io/solidverse/bazarr-translate-requester:latest
 
-docker run --rm \
-  -v /mnt/user/appdata/bazarr-translate-requester:/config \
-  ghcr.io/solidverse/bazarr-translate-requester:latest \
-  npm run run:request
+docker exec bazarr-translate-requester npm run run:generate
+docker exec bazarr-translate-requester npm run run:request
 ```
 
-Direct commands such as `node src/index.js generate` also work. The entrypoint
-forwards command arguments; supported npm application aliases are dispatched
-directly to Node so it receives container signals as PID 1. The default command
-prints help and exits. No keep-alive, restart policy or background services are
-needed. Do not use privileged mode, host networking, published ports or Docker
+The default main process is `sleep infinity`, running as PUID/PGID. The container
+stays Running until stopped; no Node.js process runs while idle. Each npm command
+starts Node.js on demand and exits when finished, leaving the container running.
+There is no WebUI, API server, cron or automatic scheduling.
+Do not use privileged mode, host networking, published ports or Docker
 socket access. Generation and dry-run requesting use read-only API metadata; live
-requesting additionally calls Bazarr translation PATCH. Every command exits.
+requesting additionally calls Bazarr translation PATCH.
+
+One-shot `docker run --rm ... npm run run:generate` (or `run:request`) remains
+supported. The entrypoint dispatches supported npm aliases directly to Node for
+container signals. Direct Node commands also remain supported; inside a running
+production container use `docker exec bazarr-translate-requester gosu 99:100 node
+src/index.js generate`, substituting your PUID/PGID if customized.
 
 Production defaults to PUID `99`, PGID `100`; override with `-e PUID=1000 -e PGID=1000`
 if necessary. Initialization briefly runs as root, validates positive numeric IDs,
@@ -142,6 +145,10 @@ executes the command unprivileged using `gosu`. It preserves contents and file
 modes, does not recurse into unrelated files and rejects linked or special
 application files. Do not use `--user`; restrictive modes, read-only mounts or
 network filesystems that disallow ownership changes may require adjustment.
+`docker exec` bypasses initialization and defaults to root. A production-only npm
+wrapper drops to PUID/PGID before starting npm and Node.js, so the commands above
+read and write `/config` using the same Unraid identity. Explicit non-root
+`docker exec --user UID:GID` invocations retain that identity.
 Development bypasses this production entrypoint and does not chown WSL bind mounts.
 
 Build locally:
@@ -357,10 +364,7 @@ Inside the development container use `docker compose exec requester` before thos
 commands. On production/Unraid the equivalent single-request invocation is:
 
 ```bash
-docker run --rm \
-  -v /mnt/user/appdata/bazarr-translate-requester:/config \
-  ghcr.io/solidverse/bazarr-translate-requester:latest \
-  npm run run:request -- --max 1
+docker exec bazarr-translate-requester npm run run:request -- --max 1
 ```
 
 These commands read your global dry-run setting; there is no implicit live override.
