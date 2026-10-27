@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm, readdir, symlink, chmod } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, readdir, mkdir, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parse } from 'yaml';
@@ -89,10 +89,12 @@ test('duplicate media entries collapse; conflicting duplicates abort without out
   assert.deepEqual(await readdir(fixture.directory), []);
 });
 
-test('any failed library aborts the complete multi-instance batch instead of publishing partial results', async (t) => {
+test('any failed library aborts the complete multi-instance batch and preserves the previous batch', async (t) => {
   const fixture = await setup(t, [environment('A'), environment('B')], { B: { fail: true } });
+  const previous = 'requests: [previous]\n'; await writeFile(fixture.path, previous);
   await assert.rejects(fixture.run({ type: 'movie' }), (error) => /movie library failed/.test(error.message) && !/TOP_SECRET|private response/.test(error.message));
-  assert.deepEqual(await readdir(fixture.directory), []);
+  assert.equal(await readFile(fixture.path, 'utf8'), previous);
+  assert.deepEqual(await readdir(fixture.directory), ['requests.yml']);
 });
 
 test('uncertain, unsupported and already-target media are excluded with distinct statistics', async (t) => {
@@ -108,22 +110,42 @@ test('uncertain, unsupported and already-target media are excluded with distinct
   assert.deepEqual(await readdir(fixture.directory), []); assert.match(fixture.lines.join(), /Unknown embedded codecs/);
 });
 
-test('existing batches and dangling symlinks are protected; preview still runs and never touches the file', async (t) => {
+test('successful generation replaces an existing batch completely; preview leaves it unchanged', async (t) => {
   const fixture = await setup(t);
   const existing = 'requests: [keep]\n'; await writeFile(fixture.path, existing);
-  await assert.rejects(fixture.run(), /existing requests.yml/); assert.equal(fixture.calls.length, 0);
   const preview = await fixture.run({ preview: true });
   assert.equal(preview.requests.length, 2); assert.equal(preview.written, false);
   assert.equal(await readFile(fixture.path, 'utf8'), existing);
   assert.match(fixture.lines.join(), /PREVIEW.*sourceLanguage.*selectedSubtitleId.*eligibleTracks/);
-  await rm(fixture.path); await symlink('/does/not/exist', fixture.path);
-  await assert.rejects(fixture.run(), /existing requests.yml/);
+  const result = await fixture.run();
+  assert.equal(result.written, true);
+  assert.deepEqual(parse(await readFile(fixture.path, 'utf8')), { requests: result.requests });
+  assert.equal((await readdir(fixture.directory)).filter((name) => name.endsWith('.tmp')).length, 0);
 });
 
-test('concurrent generation publishes exactly one complete batch and leaves no temporary files', async (t) => {
+test('successful zero-candidate generation removes the previous batch without creating an empty one', async (t) => {
+  const fixture = await setup(t, [environment()], { Main: { movies: [], series: [], episodes: [] } });
+  await writeFile(fixture.path, 'requests: [old]\n');
+  const result = await fixture.run();
+  assert.equal(result.requests.length, 0); assert.equal(result.written, false);
+  await assert.rejects(readFile(fixture.path), { code: 'ENOENT' });
+  assert.deepEqual(await readdir(fixture.directory), []);
+});
+
+test('publication failure preserves an existing destination and removes the temporary batch', async (t) => {
+  const fixture = await setup(t);
+  await mkdir(fixture.path);
+  await writeFile(join(fixture.path, 'keep'), 'old');
+  await assert.rejects(fixture.run(), /Cannot publish requests.yml/);
+  assert.equal(await readFile(join(fixture.path, 'keep'), 'utf8'), 'old');
+  assert.deepEqual(await readdir(fixture.directory), ['requests.yml']);
+  assert.deepEqual(await readdir(fixture.path), ['keep']);
+});
+
+test('concurrent generations publish complete batches and leave no temporary files', async (t) => {
   const fixture = await setup(t);
   const results = await Promise.allSettled([fixture.run(),fixture.run()]);
-  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 2);
   assert.equal(parse(await readFile(fixture.path,'utf8')).requests.length, 2);
   assert.deepEqual(await readdir(fixture.directory), ['requests.yml']);
 });
@@ -210,23 +232,20 @@ test('complete library metadata works outside the desired target profile, includ
 
 test('filtered or unknown completeness never uses missing_subtitles as authorization to generate', async (t) => {
   const fixture = await setup(t, [environment()], { Main: { complete: false } });
-  const result = await fixture.run();
-  assert.equal(result.requests.length, 0); assert.equal(result.summaries[0].uncertain, 2);
+  await assert.rejects(fixture.run(), /Subtitle visibility response is incomplete/);
   assert.deepEqual(await readdir(fixture.directory), []);
-  assert.match(fixture.lines.join(), /subtitle visibility setting is unknown/);
 });
 
-test('settings read failure leaves media uncertain, logs only safe diagnostics and writes no batch', async (t) => {
+test('settings read failure aborts and preserves the previous batch with safe diagnostics', async (t) => {
   const fixture = await setup(t);
-  const result = await fixture.run({ type: 'movie' }, { bazarrFactory: () => ({
+  const previous = 'requests: [previous]\n'; await writeFile(fixture.path, previous);
+  await assert.rejects(fixture.run({ type: 'movie' }, { bazarrFactory: () => ({
     getLanguages: async () => catalog,
     getSubtitleVisibility: async () => { throw Object.assign(new Error('TOP_SECRET http://private.invalid'), { operation: 'GET /api/system/settings', httpStatus: 403 }); },
     getMovies: async () => [item(1)],
-  }) });
-  assert.equal(result.summaries[0].uncertain, 1);
-  assert.match(fixture.lines.join(), /GET \/api\/system\/settings: HTTP 403/);
+  }) }), /Subtitle visibility failed.*GET \/api\/system\/settings: HTTP 403/);
   assert.doesNotMatch(fixture.lines.join(), /TOP_SECRET|private.invalid/);
-  assert.deepEqual(await readdir(fixture.directory), []);
+  assert.equal(await readFile(fixture.path, 'utf8'), previous);
 });
 
 for (const failure of ['changed', 'failed']) {
@@ -312,17 +331,16 @@ test('unfiltered visibility bypasses profiles entirely', async (t) => {
   assert.equal(result.requests.length, 1);
 });
 
-test('profile lookup failure is safe, contextual and remains uncertain', async (t) => {
+test('profile lookup failure aborts safely and preserves the previous batch', async (t) => {
   const fixture = await setup(t);
-  const result = await fixture.run({ type: 'movie' }, { bazarrFactory: () => ({
+  const previous = 'requests: [previous]\n'; await writeFile(fixture.path, previous);
+  await assert.rejects(fixture.run({ type: 'movie' }, { bazarrFactory: () => ({
     getLanguages: async () => catalog, getSubtitleVisibility: async () => ({ complete: false, showOnlyDesiredLanguages: true }),
     getLanguageProfiles: async () => { throw Object.assign(new Error('TOP_SECRET'), { operation: 'GET /api/system/languages/profiles', httpStatus: 403 }); },
     getMovies: async () => [item(1, 'en', 'nl', { profileId: 7 })],
-  }) });
-  assert.equal(result.requests.length, 0); assert.equal(result.summaries[0].uncertain, 1);
-  assert.match(fixture.lines.join(), /GET \/api\/system\/languages\/profiles: HTTP 403/);
-  assert.match(fixture.lines.join(), /language profiles unavailable/);
+  }) }), /Language profiles failed.*GET \/api\/system\/languages\/profiles: HTTP 403/);
   assert.doesNotMatch(fixture.lines.join(), /TOP_SECRET/);
+  assert.equal(await readFile(fixture.path, 'utf8'), previous);
 });
 
 test('profile IDs and languages are scoped to their own instance', async (t) => {
@@ -357,12 +375,12 @@ test('filtered generation uses the named SDK profile GET without provider or wri
 test('an unknown setting cannot be overridden by a valid language profile', async (t) => {
   const fixture = await setup(t);
   let profileCalls = 0;
-  const result = await fixture.run({ type: 'movie' }, { bazarrFactory: () => ({
+  await assert.rejects(fixture.run({ type: 'movie' }, { bazarrFactory: () => ({
     getLanguages: async () => catalog, getSubtitleVisibility: async () => ({ complete: false, showOnlyDesiredLanguages: null }),
     getLanguageProfiles: async () => { profileCalls++; return [{ profileId: 7, items: [{ language: 'en' }, { language: 'nl' }] }]; },
     getMovies: async () => [item(1, 'en', 'nl', { profileId: 7 })],
-  }) });
-  assert.equal(profileCalls, 0); assert.equal(result.summaries[0].uncertain, 1);
+  }) }), /Subtitle visibility response is incomplete/);
+  assert.equal(profileCalls, 0);
 });
 
 test('filtered visibility becoming unknown at recheck prevents batch publication', async (t) => {

@@ -2,7 +2,7 @@ import { dirname, join } from 'node:path';
 import { createBazarrClient, describeBazarrError } from './bazarr.js';
 import { languageResolver, evaluateSubtitles, profileLanguageVisibility } from './subtitles.js';
 import { createAgeFilter } from './age.js';
-import { ensureNoBatch, writeBatch } from './batch.js';
+import { writeBatch } from './batch.js';
 
 const validId = (id) => Number.isSafeInteger(id) && id > 0;
 function uniqueMedia(items, field) {
@@ -36,7 +36,6 @@ export async function generateRequests(config, options = {}, {
       if (options.type !== 'movie' && !instance.sonarr) throw new Error(`[${instance.name}] --min-age for episodes requires the associated Sonarr connection.`);
     }
   }
-  if (!options.preview) await ensureNoBatch(outputPath);
   const requests = [];
   const summaries = [];
   for (const instance of instances) {
@@ -56,19 +55,22 @@ export async function generateRequests(config, options = {}, {
     catch { throw new Error(`[${instance.name}] Cannot validate the Bazarr language catalog; no batch written.`); }
     const source = resolve(translation.sourceLanguage), target = resolve(translation.targetLanguage);
     if (!source || !target || source === target) throw new Error(`[${instance.name}] Unsupported or identical configured translation languages; no batch written.`);
-    let visibility = { complete: false, showOnlyDesiredLanguages: null };
+    let visibility;
     let profiles;
     try {
       visibility = await client.getSubtitleVisibility();
     } catch (error) {
-      logger.warn(`[${instance.name}] Cannot establish subtitle visibility (${describeBazarrError(error)}). Target absence remains uncertain; no setting is changed.`);
+      throw new Error(`[${instance.name}] Subtitle visibility failed (${describeBazarrError(error)}); no batch written.`);
+    }
+    if (visibility?.complete !== true && typeof visibility?.showOnlyDesiredLanguages !== 'boolean') {
+      throw new Error(`[${instance.name}] Subtitle visibility response is incomplete; no batch written.`);
     }
     if (visibility?.showOnlyDesiredLanguages === true && visibility.complete !== true) {
       try {
         const result = await client.getLanguageProfiles();
         profiles = new Map(result.map((profile) => [profile.profileId, profile]));
       } catch (error) {
-        logger.warn(`[${instance.name}] Cannot retrieve language profiles (${describeBazarrError(error)}). Assigned profile visibility remains uncertain.`);
+        throw new Error(`[${instance.name}] Language profiles failed (${describeBazarrError(error)}); no batch written.`);
       }
     }
     const age = options.minAge === undefined ? null : createAgeFilter(instance, { minAge: options.minAge, referenceTime, radarrFactory, sonarrFactory });
@@ -145,7 +147,7 @@ export async function generateRequests(config, options = {}, {
     if (summary.unknownAge) logger.warn(`[${instance.name}] Excluded ${summary.unknownAge} items with an unverified current-file import date.`);
     summaries.push(summary);
   }
-  if (!options.preview && requests.length) await writeBatch(outputPath, requests);
+  if (!options.preview) await writeBatch(outputPath, requests);
   logger.info(`${options.preview ? 'Preview' : requests.length ? 'Generated requests.yml' : 'No eligible candidates; no batch created'}: ${requests.length} candidates.`);
   return { requests, summaries, outputPath, written: !options.preview && requests.length > 0, preview: !!options.preview };
 }

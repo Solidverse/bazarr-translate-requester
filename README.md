@@ -331,15 +331,16 @@ its YAML type, or delete entire entries you do not want. Do not add approval/sta
 fields. One media item appears at most once per instance. Output order follows
 instance order and stable media-ID/track ordering.
 
-Existing batches, including symlinks, are never replaced, merged or deleted.
-Preview works even with an existing batch. No candidates means no empty file.
-Publication writes and syncs a private temporary file, then atomically hard-links
-it to `requests.yml`, preventing concurrent generators from replacing a batch.
-Temporary files are removed afterwards. Filesystems lacking hard-link support fail
-clearly; no unsafe overwrite fallback is used. Required API failures abort publishing;
-normal metadata exclusions are logged and summarized by instance.
+Each successful Generate replaces the previous batch completely; old requests
+are never merged. If there are no candidates, any previous `requests.yml` is
+removed and no empty batch is created. Preview reports candidates without changing
+the file. Generate first completes all API reads and filtering, then writes and
+syncs a private temporary file in the same directory and atomically renames it to
+`requests.yml`. A failed API read or publication preserves the previous batch, and
+temporary files are cleaned up. Normal metadata exclusions are logged and
+summarized by instance.
 
-## Request a reviewed batch
+## Request a generated batch
 
 `run:request` loads only the entries still in `requests.yml` beside the configuration
 file. It never regenerates or expands the batch. The entire YAML schema and duplicate
